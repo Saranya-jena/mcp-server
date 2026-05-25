@@ -729,7 +729,8 @@ describe("Registry", () => {
         org_id: "AI_Devops",
         project_id: "AICHAT",
         body: {
-          template_yaml: "template:\n  identifier: my_step\n  name: My Step\n  step:\n    run:\n      script: echo hi\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: my_step\n  name: My Step\n  step:\n    run:\n      script: echo hi\n",
           is_stable: true,
         },
       });
@@ -742,7 +743,7 @@ describe("Registry", () => {
         label: "1.0.0",
         git_details: { store_type: "INLINE" },
       });
-      expect(typeof call.body.template_yaml).toBe("string");
+      expect(call.body.template_yaml).toMatch(/^version: 1\n/);
     });
 
     it("template_v1 create infers org scope when only org_id is present", async () => {
@@ -757,7 +758,8 @@ describe("Registry", () => {
       await templateRegistry.dispatch(client, "template_v1", "create", {
         org_id: "AI_Devops",
         body: {
-          template_yaml: "template:\n  identifier: org_step\n  name: Org Step\n  step:\n    run:\n      script: echo hi\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: org_step\n  name: Org Step\n  step:\n    run:\n      script: echo hi\n",
         },
       });
 
@@ -776,7 +778,8 @@ describe("Registry", () => {
 
       await templateRegistry.dispatch(client, "template_v1", "create", {
         body: {
-          template_yaml: "template:\n  identifier: acc_step\n  name: Account Step\n  step:\n    run:\n      script: echo hi\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: acc_step\n  name: Account Step\n  step:\n    run:\n      script: echo hi\n",
         },
       });
 
@@ -796,7 +799,8 @@ describe("Registry", () => {
       await templateRegistry.dispatch(client, "template_v1", "create", {
         resource_scope: "account",
         body: {
-          template_yaml: "template:\n  identifier: acc_explicit\n  name: Account Explicit\n  step:\n    run:\n      script: echo hi\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: acc_explicit\n  name: Account Explicit\n  step:\n    run:\n      script: echo hi\n",
         },
       });
 
@@ -817,7 +821,8 @@ describe("Registry", () => {
         template_id: "testsj",
         version_label: "v2",
         body: {
-          template_yaml: "template:\n  identifier: testsj\n  name: Test\n  step:\n    run:\n      script: echo ok\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: testsj\n  name: Test\n  step:\n    run:\n      script: echo ok\n",
         },
       });
 
@@ -839,7 +844,8 @@ describe("Registry", () => {
       await templateRegistry.dispatch(client, "template_v1", "create", {
         project_id: "AICHAT",
         body: {
-          template_yaml: "template:\n  identifier: x\n  name: X\n  step:\n    run:\n      script: hi\n",
+          template_yaml:
+            "version: 1\ntemplate:\n  identifier: x\n  name: X\n  step:\n    run:\n      script: hi\n",
         },
       });
 
