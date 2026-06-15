@@ -14,9 +14,10 @@ export function registerDebugPipelinePrompt(server: McpServer): void {
     async ({ executionId, projectId }) => {
       // Detect if the input looks like a URL
       const isUrl = executionId?.startsWith("http");
-      const idParam = isUrl
-        ? `url="${executionId}"`
-        : `execution_id="${executionId}"`;
+      const scopeParam = projectId ? `project_id="${projectId}", ` : "";
+      const diagnoseArgs = isUrl
+        ? `url="${executionId}", ${scopeParam}options={ "include_logs": true, "return_download_url": true }`
+        : `${scopeParam}options={ "execution_id": "${executionId}", "include_logs": true, "return_download_url": true }`;
 
       return {
         messages: [{
@@ -30,7 +31,7 @@ export function registerDebugPipelinePrompt(server: McpServer): void {
 3. **Suggested fix** with specific actions
 4. **Similar patterns** — have we seen this failure type before?
 
-Start by calling harness_diagnose with ${idParam}${projectId ? `, project_id="${projectId}"` : ""}, include_logs=true to get the execution report with stage/step breakdown, timing, failure details, and failed step logs.
+Start by calling harness_diagnose with ${diagnoseArgs} to get the execution report with stage/step breakdown, timing, failure details, and failed step log download URLs.
 
 Then analyze the diagnostic payload:
 - **failure section**: failed stage, step, error message, and delegate
