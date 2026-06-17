@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveLogContent } from "../../src/utils/log-resolver.js";
+import { resolveLogContent, resolveLogDownloadUrl } from "../../src/utils/log-resolver.js";
 import { gzipSync, deflateRawSync } from "node:zlib";
 import type { HarnessClient } from "../../src/client/harness-client.js";
 
@@ -170,5 +170,37 @@ describe("resolveLogContent", () => {
     await expect(
       resolveLogContent(client, "prefix", { maxLogSizeBytes: 1024 }),
     ).rejects.toThrow(/too large/);
+  });
+});
+
+describe("resolveLogDownloadUrl", () => {
+  it("returns signed download URL without fetching blob content", async () => {
+    const client = makeClient(
+      vi.fn().mockResolvedValue({
+        status: "success",
+        link: "https://storage.googleapis.com/bucket/logs.zip?signed=1",
+      }),
+    );
+
+    const result = await resolveLogDownloadUrl(client, "acct/pipeline/p1/1/-exec1");
+
+    expect(result).toBe("https://storage.googleapis.com/bucket/logs.zip?signed=1");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("polls until status becomes success", async () => {
+    const requestFn = vi.fn()
+      .mockResolvedValueOnce({ status: "queued", link: null })
+      .mockResolvedValueOnce({
+        status: "success",
+        link: "https://storage.googleapis.com/bucket/logs.zip?signed=1",
+      });
+
+    const client = makeClient(requestFn);
+    const result = await resolveLogDownloadUrl(client, "prefix", { pollIntervalMs: 10 });
+
+    expect(result).toBe("https://storage.googleapis.com/bucket/logs.zip?signed=1");
+    expect(requestFn).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

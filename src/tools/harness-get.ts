@@ -6,7 +6,7 @@ import { jsonResult, errorResult } from "../utils/response-formatter.js";
 import { isUserError, isUserFixableApiError, toMcpError, enrichErrorWithHint, HarnessApiError } from "../utils/errors.js";
 import { applyUrlDefaults } from "../utils/url-parser.js";
 import { asString, coerceRecord } from "../utils/type-guards.js";
-import { resolveLogContent } from "../utils/log-resolver.js";
+import { resolveLogContent, resolveLogDownloadUrl } from "../utils/log-resolver.js";
 import { buildLogPrefixFromExecution } from "../utils/log-prefix.js";
 import { resourceTypeSchema } from "./input-schemas.js";
 
@@ -75,7 +75,7 @@ export function registerGetTool(server: McpServer, registry: Registry, client: H
           delete input.global;
         }
 
-        // execution_log: resolve full log content instead of returning a download URL
+        // execution_log: resolve full log content or return a signed download URL
         if (resourceType === "execution_log") {
           try {
             let prefix = asString(input.prefix);
@@ -86,6 +86,10 @@ export function registerGetTool(server: McpServer, registry: Registry, client: H
                 return errorResult("prefix or execution_id is required for execution_log. Provide a log prefix or an execution ID to auto-build it.");
               }
               prefix = await buildLogPrefixFromExecution(client, registry, executionId, input);
+            }
+            if (input.return_download_url === true) {
+              const downloadUrl = await resolveLogDownloadUrl(client, prefix);
+              return jsonResult({ download_url: downloadUrl });
             }
             const logText = await resolveLogContent(client, prefix);
             return jsonResult({ log_content: logText });

@@ -314,23 +314,15 @@ function decompressBlob(buf: Buffer): string {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-/**
- * Resolve execution log content from the Harness log-service.
- *
- * Full pipeline: initiate blob download → poll until ready → download zip →
- * extract → parse JSON log entries → return clean text.
- */
-export async function resolveLogContent(
+async function pollLogBlobLink(
   client: HarnessClient,
   prefix: string,
   options?: LogResolveOptions,
 ): Promise<string> {
   const maxAttempts = options?.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS;
   const pollInterval = options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const maxBytes = options?.maxLogSizeBytes ?? DEFAULT_MAX_LOG_BYTES;
   const signal = options?.signal;
 
-  // Step 1 & 2: Initiate and poll until status is "success"
   let blob: BlobResponse | undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new Error("Log download cancelled");
@@ -344,7 +336,7 @@ export async function resolveLogContent(
     });
 
     if (blob?.status === "success" && blob.link) {
-      break;
+      return resolveDownloadUrl(blob.link, client.baseURL);
     }
 
     if (attempt < maxAttempts - 1) {
@@ -353,15 +345,39 @@ export async function resolveLogContent(
     }
   }
 
-  if (!blob?.link) {
-    throw new Error(
-      `Log blob not ready after ${maxAttempts} attempts (status: ${blob?.status ?? "unknown"}). Logs may still be processing or have expired.`,
-    );
-  }
+  throw new Error(
+    `Log blob not ready after ${maxAttempts} attempts (status: ${blob?.status ?? "unknown"}). Logs may still be processing or have expired.`,
+  );
+}
 
-  // Step 3: Download the zip/gzip from the signed URL
-  // External storage (GCS, S3): use as-is. Harness-hosted: rewrite host when self-managed.
-  const downloadUrl = resolveDownloadUrl(blob.link, client.baseURL);
+/**
+ * Resolve a signed logs.zip download URL without downloading log content.
+ */
+export async function resolveLogDownloadUrl(
+  client: HarnessClient,
+  prefix: string,
+  options?: LogResolveOptions,
+): Promise<string> {
+  const downloadUrl = await pollLogBlobLink(client, prefix, options);
+  log.debug("Resolved log download URL", { prefix, url: downloadUrl.slice(0, 80) });
+  return downloadUrl;
+}
+
+/**
+ * Resolve execution log content from the Harness log-service.
+ *
+ * Full pipeline: initiate blob download → poll until ready → download zip →
+ * extract → parse JSON log entries → return clean text.
+ */
+export async function resolveLogContent(
+  client: HarnessClient,
+  prefix: string,
+  options?: LogResolveOptions,
+): Promise<string> {
+  const maxBytes = options?.maxLogSizeBytes ?? DEFAULT_MAX_LOG_BYTES;
+  const signal = options?.signal;
+
+  const downloadUrl = await pollLogBlobLink(client, prefix, options);
   log.debug("Downloading log blob", { prefix, url: downloadUrl.slice(0, 80) });
   const downloadSignal = signal
     ? AbortSignal.any([signal, AbortSignal.timeout(DEFAULT_DOWNLOAD_TIMEOUT_MS)])
