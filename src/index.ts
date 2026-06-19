@@ -224,10 +224,48 @@ interface Session {
   server: McpServer;
   transport: StreamableHTTPServerTransport;
   lastActivity: number;
+  clientName?: string;
+  userAgent?: string;
 }
 
 const SESSION_TTL_MS = 30 * 60_000; // 30 minutes
 const REAP_INTERVAL_MS = 60_000;    // check every minute
+const UNKNOWN_USER_AGENT_SAMPLE_RATE = 0.05;
+
+const CLIENT_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/claude[-\s]?code|claudecode/i, "claude-code"],
+  [/claude[-\s]?desktop/i, "claude-desktop"],
+  [/claude/i, "claude"],
+  [/cursor[-\s]?agent/i, "cursor-agent"],
+  [/cursor/i, "cursor"],
+  [/windsurf|codeium/i, "windsurf"],
+  [/github[-\s]?copilot|copilot/i, "copilot"],
+  [/vscode|visual[-\s]?studio[-\s]?code/i, "vscode"],
+  [/continue/i, "continue"],
+  [/cline/i, "cline"],
+  [/zed/i, "zed"],
+  [/mcp-inspector|modelcontextprotocol/i, "mcp-inspector"],
+];
+
+function getUserAgentHeader(req: import("express").Request): string | undefined {
+  const header = req.headers["user-agent"];
+  if (Array.isArray(header)) {
+    return header.find((value) => typeof value === "string" && value.length > 0);
+  }
+  return typeof header === "string" && header.length > 0 ? header : undefined;
+}
+
+function parseClientName(userAgent: string | undefined): string | undefined {
+  if (!userAgent) return undefined;
+  for (const [pattern, name] of CLIENT_ALIASES) {
+    if (pattern.test(userAgent)) return name;
+  }
+  return undefined;
+}
+
+function shouldSampleUnknownUserAgent(): boolean {
+  return Math.random() < UNKNOWN_USER_AGENT_SAMPLE_RATE;
+}
 
 /**
  * Start the server in HTTP mode — stateful, session-based.
@@ -345,6 +383,20 @@ async function startHttp(config: Config, port: number): Promise<void> {
         return;
       }
       session.lastActivity = Date.now();
+      const requestUserAgent = getUserAgentHeader(req);
+      const requestClientName = parseClientName(requestUserAgent);
+      if (requestClientName) {
+        session.clientName = requestClientName;
+      }
+      if (requestUserAgent) {
+        session.userAgent = requestUserAgent;
+      }
+      if (requestUserAgent && !requestClientName && shouldSampleUnknownUserAgent()) {
+        log.info("Unknown client User-Agent observed", {
+          user_agent: requestUserAgent.slice(0, 256),
+          sessionId,
+        });
+      }
       try {
         await session.transport.handleRequest(req, res, req.body);
       } catch (err) {
@@ -367,11 +419,29 @@ async function startHttp(config: Config, port: number): Promise<void> {
       const sessionConfig = mergeConfigWithPipelineVersion(config, req);
       const result = createHarnessServer(sessionConfig, sharedAuditManager);
       server = result.server;
+      const initUserAgent = getUserAgentHeader(req);
+      const initClientName = parseClientName(initUserAgent);
+      if (initUserAgent && !initClientName && shouldSampleUnknownUserAgent()) {
+        log.info("Unknown client User-Agent observed", {
+          user_agent: initUserAgent.slice(0, 256),
+        });
+      }
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          sessions.set(id, { server: server!, transport: transport!, lastActivity: Date.now() });
-          log.info("Session created", { sessionId: id, total: sessions.size });
+          sessions.set(id, {
+            server: server!,
+            transport: transport!,
+            lastActivity: Date.now(),
+            ...(initClientName ? { clientName: initClientName } : {}),
+            ...(initUserAgent ? { userAgent: initUserAgent } : {}),
+          });
+          log.info("Session created", {
+            sessionId: id,
+            total: sessions.size,
+            client_name: initClientName,
+            user_agent: initUserAgent,
+          });
         },
       });
 
