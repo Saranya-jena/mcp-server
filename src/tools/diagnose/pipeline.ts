@@ -4,7 +4,7 @@ import type { Config } from "../../config.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendProgress } from "../../utils/progress.js";
 import { isRecord, asRecord, asString, asNumber } from "../../utils/type-guards.js";
-import { resolveLogContent } from "../../utils/log-resolver.js";
+import { resolveLogContent, resolveLogDownloadUrl } from "../../utils/log-resolver.js";
 
 const log = createLogger("diagnose:pipeline");
 
@@ -437,6 +437,23 @@ function truncateLog(raw: unknown, maxLines: number): unknown {
   return raw;
 }
 
+async function resolveDiagnoseLog(
+  client: HarnessClient,
+  prefix: string,
+  options: {
+    signal?: AbortSignal;
+    returnDownloadUrl?: boolean;
+    logSnippetLines: number;
+  },
+): Promise<unknown> {
+  if (options.returnDownloadUrl) {
+    const downloadUrl = await resolveLogDownloadUrl(client, prefix, { signal: options.signal });
+    return { download_url: downloadUrl };
+  }
+  const logText = await resolveLogContent(client, prefix, { signal: options.signal });
+  return truncateLog(logText, options.logSnippetLines);
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export const pipelineHandler: DiagnoseHandler = {
@@ -452,6 +469,7 @@ export const pipelineHandler: DiagnoseHandler = {
 
     const includeYaml = args.include_yaml ?? !isSummary;
     const includeLogs = args.include_logs ?? !isSummary;
+    const returnDownloadUrl = args.return_download_url === true;
     const logSnippetLines = asNumber(args.log_snippet_lines) ?? 120;
     const maxFailedSteps = asNumber(args.max_failed_steps) ?? 5;
 
@@ -582,21 +600,41 @@ export const pipelineHandler: DiagnoseHandler = {
         diagnostic.failed_steps_truncated = { shown: capped.length, total: failedNodes.length };
       }
 
-      const logEntries = await Promise.all(
-        capped.map(async (fn) => {
-          const key = `${fn.stage}/${fn.step}`;
-          const prefix = fn.log_key;
-          if (!prefix) return { key, value: { error: "No log key available for this step" } };
-          fetchedFailedLogKeys.add(prefix);
-          try {
-            const logText = await resolveLogContent(client, prefix, { signal });
-            return { key, value: truncateLog(logText, logSnippetLines) };
-          } catch (err) {
-            log.warn("Failed to fetch step logs", { step: fn.step, error: String(err) });
-            return { key, value: { error: String(err) } };
-          }
-        }),
-      );
+      // Bound concurrency. Each resolveLogContent buffers a downloaded blob
+      // (capped at maxLogSizeBytes) into the V8 heap; firing capped.length
+      // calls in parallel was a contributor to mcp-server-internal cgroup
+      // OOMs in prod2 (AIDEVOPS-2200). The default of 3 keeps p99 diagnose
+      // latency similar to before for typical 1–3 failed steps, and
+      // dramatically caps peak memory when the user passes a large
+      // max_failed_steps. Tunable via HARNESS_DIAGNOSE_LOG_FETCH_CONCURRENCY.
+      // Fall back to 3 if the config field is missing (e.g. older callers
+      // constructing Config manually in tests); Zod gives 3 in production.
+      const logFetchConcurrency = config.HARNESS_DIAGNOSE_LOG_FETCH_CONCURRENCY ?? 3;
+      const logEntries: { key: string; value: unknown }[] = [];
+      for (let i = 0; i < capped.length; i += logFetchConcurrency) {
+        signal?.throwIfAborted();
+        const batch = capped.slice(i, i + logFetchConcurrency);
+        const batchResults = await Promise.all(
+          batch.map(async (fn) => {
+            const key = `${fn.stage}/${fn.step}`;
+            const prefix = fn.log_key;
+            if (!prefix) return { key, value: { error: "No log key available for this step" } };
+            fetchedFailedLogKeys.add(prefix);
+            try {
+              const logValue = await resolveDiagnoseLog(client, prefix, {
+                signal,
+                returnDownloadUrl,
+                logSnippetLines,
+              });
+              return { key, value: logValue };
+            } catch (err) {
+              log.warn("Failed to fetch step logs", { step: fn.step, error: String(err) });
+              return { key, value: { error: String(err) } };
+            }
+          }),
+        );
+        logEntries.push(...batchResults);
+      }
 
       const stepLogs: Record<string, unknown> = {};
       for (const entry of logEntries) {
@@ -621,12 +659,18 @@ export const pipelineHandler: DiagnoseHandler = {
           status: requestedNode.status,
         });
         try {
-          const logText = await resolveLogContent(client, requestedNode.logBaseKey, { signal });
+          const logValue = await resolveDiagnoseLog(client, requestedNode.logBaseKey, {
+            signal,
+            returnDownloadUrl,
+            logSnippetLines,
+          });
           diagnostic.requested_step_log = {
             step_id: requestedStepId,
             step: requestedNode.identifier ?? requestedNode.name,
             status: requestedNode.status,
-            log: truncateLog(logText, logSnippetLines),
+            ...(returnDownloadUrl
+              ? { download_url: (logValue as { download_url: string }).download_url }
+              : { log: logValue }),
           };
         } catch (err) {
           log.warn("Failed to fetch requested step log", { step_id: requestedStepId, error: String(err) });
@@ -685,12 +729,18 @@ export const pipelineHandler: DiagnoseHandler = {
           status: bestNode.status,
         });
         try {
-          const logText = await resolveLogContent(client, bestNode.logBaseKey, { signal });
+          const logValue = await resolveDiagnoseLog(client, bestNode.logBaseKey, {
+            signal,
+            returnDownloadUrl,
+            logSnippetLines,
+          });
           diagnostic.requested_step_log = {
             step_id: bestNodeId,
             step: bestNode.identifier ?? bestNode.name,
             status: bestNode.status,
-            log: truncateLog(logText, logSnippetLines),
+            ...(returnDownloadUrl
+              ? { download_url: (logValue as { download_url: string }).download_url }
+              : { log: logValue }),
           };
         } catch (err) {
           log.warn("Failed to auto-fetch step log", { step_id: bestNodeId, error: String(err) });

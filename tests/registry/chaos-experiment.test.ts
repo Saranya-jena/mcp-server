@@ -98,6 +98,76 @@ describe("chaos_experiment list/get", () => {
     expect((result.items[1] as Record<string, unknown>).name).toBe("Exp B");
   });
 
+  it("list: per-item openInHarness uses the experiment UUID (not name) and the chaos-studio route", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({
+      data: [
+        { experimentID: "91351b37-56da-426c-aee9-668ccf329023", name: "test-conditions" },
+      ],
+      pagination: { totalItems: 1 },
+    });
+    const client = makeClient(mockRequest);
+
+    const result = (await registry.dispatch(client, "chaos_experiment", "list", {
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    })) as { items: Array<Record<string, unknown>> };
+
+    expect(result.items[0].openInHarness).toBe(
+      "https://app.harness.io/ng/account/test-account/module/chaos/orgs/templatescopetest/projects/templatescopetest/experiments/91351b37-56da-426c-aee9-668ccf329023/chaos-studio",
+    );
+  });
+
+  it("chaos_experiment_run get: openInHarness points to the experiment runs page", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentID: "exp-1", name: "pod-delete" });
+    const client = makeClient(mockRequest);
+
+    const result = (await registry.dispatch(client, "chaos_experiment_run", "get", {
+      experiment_id: "exp-1",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    })) as Record<string, unknown>;
+
+    expect(result.openInHarness).toBe(
+      "https://app.harness.io/ng/account/test-account/module/chaos/orgs/templatescopetest/projects/templatescopetest/experiments/exp-1/runs",
+    );
+  });
+
+  it("chaos_input_set list: per-item openInHarness uses the parent experiment id (not the item name)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({
+      data: [{ identity: "is-1", name: "Set A" }],
+      pagination: { totalItems: 1 },
+    });
+    const client = makeClient(mockRequest);
+
+    const result = (await registry.dispatch(client, "chaos_input_set", "list", {
+      experiment_id: "exp-1",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    })) as { items: Array<Record<string, unknown>> };
+
+    expect(result.items[0].openInHarness).toBe(
+      "https://app.harness.io/ng/account/test-account/module/chaos/orgs/templatescopetest/projects/templatescopetest/experiments/exp-1/inputsets",
+    );
+  });
+
+  it("chaos_experiment_variable list: items carry no openInHarness (no deep link)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({
+      experiment: [{ name: "DURATION", value: "60" }],
+      tasks: null,
+    });
+    const client = makeClient(mockRequest);
+
+    const result = (await registry.dispatch(client, "chaos_experiment_variable", "list", {
+      experiment_id: "exp-1",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    })) as { items: Array<Record<string, unknown>> };
+
+    for (const item of result.items) {
+      expect(item.openInHarness).toBeUndefined();
+    }
+  });
+
   it("get: builds correct path with experimentId and returns passthrough data", async () => {
     const experimentPayload = {
       experimentID: "exp-pod-delete",
@@ -140,6 +210,226 @@ describe("chaos_experiment list/get", () => {
     const call = mockRequest.mock.calls[0][0];
     expect(call.params.organizationIdentifier).toBe("default");
     expect(call.params.projectIdentifier).toBe("test-project");
+  });
+});
+
+describe("chaos_experiment create", () => {
+  // Locks the bodySchema <-> bodyBuilder contract:
+  //   - bodySchema marks `id` optional, so omitting it must NOT trip required-field validation
+  //   - bodyBuilder must auto-generate a v4 UUID when `id` is missing
+  //   - caller-supplied `id` must round-trip untouched
+  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  let registry: Registry;
+
+  beforeEach(() => {
+    registry = new Registry(makeConfig());
+  });
+
+  it("create: auto-generates a v4 UUID for id when caller omits it", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentID: "new-exp" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_experiment", "create", {
+      org_id: "default",
+      project_id: "test-project",
+      name: "demo-exp-01",
+      manifest: "apiVersion: litmuschaos.io/v1alpha1\nkind: ChaosEngine",
+      infra_id: "demo/infra-1",
+      infra_type: "Kubernetes",
+    });
+
+    expect(mockRequest).toHaveBeenCalledOnce();
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/experiment");
+    expect(call.body.id).toMatch(UUID_V4);
+    expect(call.body.name).toBe("demo-exp-01");
+    expect(call.body.infraId).toBe("demo/infra-1");
+    expect(call.body.infra_id).toBe("demo/infra-1");
+    expect(call.body.infraType).toBe("Kubernetes");
+  });
+
+  it("create: echoes caller-supplied id without overwriting it", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentID: "new-exp" });
+    const client = makeClient(mockRequest);
+    const callerId = "11111111-2222-4333-8444-555555555555";
+
+    await registry.dispatch(client, "chaos_experiment", "create", {
+      org_id: "default",
+      project_id: "test-project",
+      id: callerId,
+      name: "demo-exp-02",
+      manifest: "apiVersion: litmuschaos.io/v1alpha1\nkind: ChaosEngine",
+      infra_id: "demo/infra-2",
+      infra_type: "Kubernetes",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.body.id).toBe(callerId);
+  });
+
+  it("create: documented contract — composite infra_id '{environmentIdentifier}/{infraID}' passes through verbatim", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentID: "exp-composite" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_experiment", "create", {
+      org_id: "default",
+      project_id: "test-project",
+      name: "demo-exp-composite",
+      manifest: "apiVersion: litmuschaos.io/v1alpha1\nkind: ChaosEngine",
+      infra_id: "demo/qaauto1",
+      infra_type: "Kubernetes",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.body.infraId).toBe("demo/qaauto1");
+    expect(call.body.infra_id).toBe("demo/qaauto1");
+  });
+});
+
+describe("chaos_action create", () => {
+  let registry: Registry;
+  beforeEach(() => { registry = new Registry(makeConfig()); });
+
+  it("create: builds the delay-action body matching the verified curl", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ identity: "deplay-action-01", name: "deplay-action-01", type: "delay" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_action", "create", {
+      org_id: "templatescopetest",
+      project_id: "templatescopetest",
+      identity: "deplay-action-01",
+      name: "deplay-action-01",
+      description: "optional desc",
+      tags: ["op:tag1", "op:tag2"],
+      infrastructure_type: "Kubernetes",
+      type: "delay",
+      variables: [{ name: "variable_1", type: "String", value: "10", description: "variable1 desc" }],
+      action_properties: { delayAction: { duration: "5s" } },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/actions");
+    expect(call.body).toMatchObject({
+      identity: "deplay-action-01",
+      name: "deplay-action-01",
+      description: "optional desc",
+      tags: ["op:tag1", "op:tag2"],
+      infrastructureType: "Kubernetes",
+      type: "delay",
+      variables: [{ name: "variable_1", type: "String", value: "10", description: "variable1 desc" }],
+      actionProperties: { delayAction: { duration: "5s" } },
+      inputs: [],
+    });
+  });
+
+  it("create: identity defaults to name when omitted", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+    await registry.dispatch(client, "chaos_action", "create", {
+      org_id: "default", project_id: "p",
+      name: "my-delay", type: "delay", infrastructure_type: "Linux",
+      action_properties: { delayAction: { duration: "5s" } },
+    });
+    expect(mockRequest.mock.calls[0][0].body.identity).toBe("my-delay");
+  });
+
+  it("create: duration shorthand builds delayAction when action_properties omitted", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+    await registry.dispatch(client, "chaos_action", "create", {
+      org_id: "default", project_id: "p",
+      name: "d", type: "delay", infrastructure_type: "Kubernetes", duration: "30s",
+    });
+    expect(mockRequest.mock.calls[0][0].body.actionProperties).toEqual({ delayAction: { duration: "30s" } });
+  });
+
+  it("create: accepts Windows and Linux infra for a delay action", async () => {
+    for (const infra of ["Windows", "Linux"]) {
+      const mockRequest = vi.fn().mockResolvedValue({});
+      const client = makeClient(mockRequest);
+      await registry.dispatch(client, "chaos_action", "create", {
+        org_id: "default", project_id: "p",
+        name: "d", type: "delay", infrastructure_type: infra,
+        action_properties: { delayAction: { duration: "5s" } },
+      });
+      expect(mockRequest.mock.calls[0][0].body.infrastructureType).toBe(infra);
+    }
+  });
+
+  it("create: builds the customScript-action body matching the verified curl", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ identity: "custom-script-action-8s3", name: "new-custom-script-action-8s3", type: "customScript" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_action", "create", {
+      org_id: "templatescopetest", project_id: "templatescopetest",
+      identity: "custom-script-action-8s3",
+      name: "new-custom-script-action-8s3",
+      description: "optional desc",
+      tags: ["op:tag1", "op:tag2"],
+      infrastructure_type: "Kubernetes",
+      type: "customScript",
+      variables: [{ name: "randomVar1", type: "String", value: "10", required: true }],
+      action_properties: { customScriptAction: { command: "/bin/sh", args: ["-c", "while true; do echo hello; sleep 10;done"], env: [{ name: "HELLO", value: "WORLD" }] } },
+      run_properties: { maxRetries: 1, initialDelay: "5s", interval: "2s", timeout: "10s", iterations: 1 },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/actions");
+    expect(call.body).toMatchObject({
+      identity: "custom-script-action-8s3",
+      name: "new-custom-script-action-8s3",
+      description: "optional desc",
+      tags: ["op:tag1", "op:tag2"],
+      infrastructureType: "Kubernetes",
+      type: "customScript",
+      variables: [{ name: "randomVar1", type: "String", value: "10", required: true }],
+      actionProperties: { customScriptAction: { command: "/bin/sh", args: ["-c", "while true; do echo hello; sleep 10;done"], env: [{ name: "HELLO", value: "WORLD" }] } },
+      runProperties: { maxRetries: 1, initialDelay: "5s", interval: "2s", timeout: "10s", iterations: 1 },
+      inputs: [],
+    });
+  });
+
+  it("create: builds the container-action body (Kubernetes; command array + args string)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ identity: "container-action-zia", name: "new-container-action-zia", type: "container" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_action", "create", {
+      org_id: "templatescopetest", project_id: "templatescopetest",
+      identity: "container-action-zia",
+      name: "new-container-action-zia",
+      infrastructure_type: "Kubernetes",
+      type: "container",
+      action_properties: { containerAction: {
+        image: "bitnami/kubectl:latest",
+        command: ["/bin/sh", "-c"],
+        args: 'echo "Hello World"',
+        env: [{ name: "Hello_Variable1", value: "World_Ans2" }],
+        namespace: "some",
+        imagePullPolicy: "IfNotPresent",
+      } },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/actions");
+    expect(call.body).toMatchObject({
+      identity: "container-action-zia",
+      name: "new-container-action-zia",
+      infrastructureType: "Kubernetes",
+      type: "container",
+      actionProperties: { containerAction: {
+        image: "bitnami/kubectl:latest",
+        command: ["/bin/sh", "-c"],
+        args: 'echo "Hello World"',
+        env: [{ name: "Hello_Variable1", value: "World_Ans2" }],
+        namespace: "some",
+        imagePullPolicy: "IfNotPresent",
+      } },
+      inputs: [],
+    });
   });
 });
 
@@ -280,6 +570,68 @@ describe("chaos_k8s_infrastructure list", () => {
     const call = mockRequest.mock.calls[0][0];
     expect(call.method).toBe("GET");
     expect(call.path).toBe("/chaos/manager/api/rest/kubernetes/infra/infra-abc/health");
+  });
+});
+
+describe("chaos_enabled_infrastructure list", () => {
+  let registry: Registry;
+
+  beforeEach(() => {
+    registry = new Registry(makeConfig());
+  });
+
+  it("list: targets the chaos-enabled endpoint and extracts infras/total", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({
+      infras: [{ infraID: "k8s-1", name: "prod-cluster", status: "ACTIVE", isChaosEnabled: true }],
+      pagination: { page: 0, limit: 15 },
+      totalNoOfInfrastructures: 1,
+    });
+    const client = makeClient(mockRequest);
+
+    const result = (await registry.dispatch(client, "chaos_enabled_infrastructure", "list", {
+      project_id: "PM_Signoff",
+      org_id: "default",
+    })) as { items: unknown[]; total: number };
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/infrastructures/chaos-enabled");
+    expect(call.params).toMatchObject({ organizationIdentifier: "default", projectIdentifier: "PM_Signoff" });
+    expect(result.items).toHaveLength(1);
+    expect(result.total).toBe(1);
+  });
+
+  it("list: uppercases infra_type, sends infra_scope/is_ai_enabled in body, env as query param", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ infras: [], totalNoOfInfrastructures: 0 });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_enabled_infrastructure", "list", {
+      project_id: "ChaosDev1",
+      org_id: "default",
+      environment_id: "demoash",
+      infra_type: "KubernetesV2",
+      infra_scope: "CLUSTER",
+      is_ai_enabled: false,
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.environmentIdentifier).toBe("demoash");
+    expect(call.params.infraType).toBeUndefined();
+    expect(call.body.filter).toMatchObject({
+      infraTypeFilter: "KUBERNETESV2",
+      infraScope: "CLUSTER",
+      isAIEnabled: false,
+    });
+  });
+
+  it("list: sends empty body when no filters provided", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ infras: [], totalNoOfInfrastructures: 0 });
+    const client = makeClient(mockRequest);
+    await registry.dispatch(client, "chaos_enabled_infrastructure", "list", {
+      project_id: "ChaosDev1",
+      org_id: "default",
+    });
+    expect(mockRequest.mock.calls[0][0].body.filter).toBeUndefined();
   });
 });
 
@@ -456,5 +808,296 @@ describe("chaos_probe_template list pagination and defaults", () => {
 
     const call = mockRequest.mock.calls[0][0];
     expect(call.params.includeAllScope).toBe(false);
+  });
+});
+
+describe("chaos_experiment isIdentity routing", () => {
+  let registry: Registry;
+
+  beforeEach(() => {
+    registry = new Registry(makeConfig());
+  });
+
+  it("run: defaults isIdentity=true so a slug experiment_id works", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentRunId: "run-1" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "exp-without-runtime",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/experiments/exp-without-runtime/run");
+    expect(call.params.isIdentity).toBe("true");
+  });
+
+  it("run: is_identity=false override forces UUID lookup", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experimentRunId: "run-1" });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      is_identity: false,
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.isIdentity).toBe(false);
+  });
+
+  it("variables list: defaults isIdentity=true so a slug experiment_id works", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experiment: [], tasks: {} });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_experiment_variable", "list", {
+      experiment_id: "exp-without-runtime",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("GET");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/experiments/exp-without-runtime/variables");
+    expect(call.params.isIdentity).toBe("true");
+  });
+
+  it("variables list: null experiment/tasks returns empty items (no schema error)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ experiment: null, tasks: null });
+    const client = makeClient(mockRequest);
+
+    const result = await registry.dispatch(client, "chaos_experiment_variable", "list", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      is_identity: false,
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    }) as { items: unknown[]; total: number };
+
+    expect(Array.isArray(result.items)).toBe(true);
+    expect(result.items).toHaveLength(0);
+    expect(result.total).toBe(0);
+  });
+
+  it("input_set list: defaults isIdentity=false so UUID is the default lookup", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ data: [], pagination: { totalItems: 0 } });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_input_set", "list", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("GET");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/experiments/ef9199b6-0248-4c0b-9d63-9176bf2b7123/inputsets");
+    expect(call.params.isIdentity).toBe("false");
+  });
+
+  it("input_set list: is_identity=true override passes slug to backend", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ data: [], pagination: { totalItems: 0 } });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_input_set", "list", {
+      experiment_id: "exp-without-runtime",
+      is_identity: true,
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.isIdentity).toBe(true);
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/experiments/exp-without-runtime/inputsets");
+  });
+
+  it("input_set list: is_identity=false with UUID passes false to backend", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ data: [], pagination: { totalItems: 0 } });
+    const client = makeClient(mockRequest);
+
+    await registry.dispatch(client, "chaos_input_set", "list", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      is_identity: false,
+      project_id: "templatescopetest",
+      org_id: "templatescopetest",
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.isIdentity).toBe(false);
+  });
+});
+
+describe("chaos_experiment.run bodyBuilder — runtime_inputs handling", () => {
+  let registry: Registry;
+  beforeEach(() => { registry = new Registry(makeConfig()); });
+
+  it("run: merges runtime_inputs with experiment_variables instead of overwriting (A1)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "exp1",
+      project_id: "proj1",
+      org_id: "org1",
+      runtime_inputs: { experiment: [{ name: "REGION", value: "us-east-1" }] },
+      experiment_variables: [{ name: "DURATION", value: "60s" }],
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    const expArr = (call.body.runtimeInputs as { experiment: Array<{ name: string; value: unknown }> }).experiment;
+    expect(expArr).toEqual(
+      expect.arrayContaining([
+        { name: "REGION", value: "us-east-1" },
+        { name: "DURATION", value: "60s" },
+      ]),
+    );
+    expect(expArr).toHaveLength(2);
+  });
+
+  it("run: top-level experiment_variables wins on name conflict with runtime_inputs (A1)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "exp1",
+      project_id: "proj1",
+      org_id: "org1",
+      runtime_inputs: { experiment: [{ name: "REGION", value: "us-east-1" }] },
+      experiment_variables: [{ name: "REGION", value: "eu-west-1" }],
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    const expArr = (call.body.runtimeInputs as { experiment: Array<{ name: string; value: unknown }> }).experiment;
+    expect(expArr).toEqual([{ name: "REGION", value: "eu-west-1" }]);
+  });
+
+  it("run: unwraps input.body via coerceBody so body={runtime_inputs:...} flows through (A2)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "exp1",
+      project_id: "proj1",
+      org_id: "org1",
+      body: { runtime_inputs: { experiment: [{ name: "REGION", value: "us-east-1" }] } },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.body.runtimeInputs).toEqual({
+      experiment: [{ name: "REGION", value: "us-east-1" }],
+    });
+  });
+
+  it("run: throws via coerceBody when body is malformed JSON (A2)", async () => {
+    const mockRequest = vi.fn();
+    const client = makeClient(mockRequest);
+
+    await expect(
+      registry.dispatchExecute(client, "chaos_experiment", "run", {
+        experiment_id: "exp1",
+        project_id: "proj1",
+        org_id: "org1",
+        body: "{",
+      }),
+    ).rejects.toThrow(/Invalid JSON in 'body'/);
+
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("run: hoists is_identity from body so URL gets ?isIdentity=false (Call 2/3 regression)", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      project_id: "proj1",
+      org_id: "org1",
+      body: { is_identity: false, inputset_identity: "testinputset" },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.isIdentity).toBe(false);
+    expect(call.body.inputsetIdentity).toBe("testinputset");
+  });
+
+  it("run: top-level is_identity wins over body.is_identity on conflict", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({});
+    const client = makeClient(mockRequest);
+
+    await registry.dispatchExecute(client, "chaos_experiment", "run", {
+      experiment_id: "ef9199b6-0248-4c0b-9d63-9176bf2b7123",
+      project_id: "proj1",
+      org_id: "org1",
+      is_identity: false,
+      body: { is_identity: true },
+    });
+
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.params.isIdentity).toBe(false);
+  });
+});
+
+describe("chaos_application_map.get required field validation (preflight)", () => {
+  let registry: Registry;
+  beforeEach(() => { registry = new Registry(makeConfig()); });
+
+  it("get: throws locally when 'environment_id' is missing", async () => {
+    const mockRequest = vi.fn();
+    const client = makeClient(mockRequest);
+    await expect(
+      registry.dispatch(client, "chaos_application_map", "get", {
+        project_id: "proj1",
+        org_id: "org1",
+        map_id: "some-map-id",
+        infra_id: "some-infra",
+      }),
+    ).rejects.toThrow(/Missing required field.*environment_id/);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("get: throws locally when 'infra_id' is missing", async () => {
+    const mockRequest = vi.fn();
+    const client = makeClient(mockRequest);
+    await expect(
+      registry.dispatch(client, "chaos_application_map", "get", {
+        project_id: "proj1",
+        org_id: "org1",
+        map_id: "some-map-id",
+        environment_id: "demo",
+      }),
+    ).rejects.toThrow(/Missing required field.*infra_id/);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("get: throws locally when both 'environment_id' and 'infra_id' are missing", async () => {
+    const mockRequest = vi.fn();
+    const client = makeClient(mockRequest);
+    await expect(
+      registry.dispatch(client, "chaos_application_map", "get", {
+        project_id: "proj1",
+        org_id: "org1",
+        map_id: "some-map-id",
+      }),
+    ).rejects.toThrow(/environment_id.*infra_id|infra_id.*environment_id/);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+
+  it("get: proceeds and sends both query params when required fields are present", async () => {
+    const mockRequest = vi.fn().mockResolvedValue({ identity: "map1", services: [] });
+    const client = makeClient(mockRequest);
+    await registry.dispatch(client, "chaos_application_map", "get", {
+      project_id: "proj1",
+      org_id: "org1",
+      map_id: "some-map-id",
+      environment_id: "demo",
+      infra_id: "qaauto1",
+    });
+    expect(mockRequest).toHaveBeenCalledOnce();
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("GET");
+    expect(call.path).toBe("/chaos/manager/api/rest/v2/applicationmaps/some-map-id");
+    expect(call.params).toMatchObject({ environmentIdentifier: "demo", infraId: "qaauto1" });
   });
 });

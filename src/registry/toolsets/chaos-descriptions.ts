@@ -1,10 +1,83 @@
 // ── Toolset ──────────────────────────────────────────────────────────
 
-export const descToolsetChaos = `Harness Chaos Engineering — run/stop/govern chaos experiments; manage probes, faults (Kubernetes, AWS, Azure, GCP, Linux), actions, hubs, and templates (experiment, fault, probe, action); inspect experiment runs and resiliency scores; configure Kubernetes and Linux infrastructure and environments; visualize blast radius via network maps; enforce governance via ChaosGuard rules/conditions; analyze recommendations and risks; run load tests; list disaster recovery (DR) tests`;
+export const descToolsetChaos = `Harness Resilience Testing (Formerly known as Chaos Engineering) — controlled failure injection against Kubernetes/Linux workloads to measure and improve resilience.
+IMPORTANT: If user refers to Chaos or Resilience Testing both are same, but use Resilience Testing in your responses for all kind of Chaos related questions & tools usage.
+
+PRIMITIVES (the building blocks of every experiment):
+- Fault — a single failure injection step (e.g. pod-delete, gcp-vm-kill, disk-fill, network-loss). Built-in or custom; lives in a chaos hub. Resource: chaos_fault.
+- Action — a non-failure step used for setup/teardown (delay, customScript, container exec). Resource: chaos_action.
+- Probe — a continuous health check that runs alongside the experiment (httpProbe, cmdProbe, promProbe, k8sProbe, sloProbe, datadogProbe, etc.). Probe verdicts produce the resiliency score. Resource: chaos_probe.
+- Experiment — a manifest combining one or more faults + actions + probes, plus runtime variables. Resource: chaos_experiment. Supports run/stop. The same primitives have template forms (chaos_fault_template, chaos_action_template, chaos_probe_template, chaos_experiment_template) that live in chaos hubs (chaos_hub) and are instantiated via the create_from_template execute action.
+
+INFRASTRUCTURE LAYER (where experiments execute):
+- chaos_k8s_infrastructure — a chaos agent installed inside a Kubernetes cluster, scoped to one Harness environment. An experiment can only run when status=ACTIVE and isChaosEnabled=true.
+- chaos_infrastructure — Linux/machine equivalent.
+- chaos_environment — the Harness env scoping the infra.
+
+SERVICE DISCOVERY (SD) — END-TO-END JOURNEY:
+1. Customer installs an SD agent in a Kubernetes cluster (one agent per chaos_k8s_infrastructure).
+2. SD agent uses eBPF to discover namespaces, services, workloads, and inter-service connections. Inspect via discovered_namespace, discovered_service.
+3. Customer (or rules) selects a subset of services into an SD network map. Inspect via discovered_network_map (raw, per-agent inventory).
+4. The SD network map is promoted into a chaos_application_map, scoped to one (environment, infrastructure) pair.
+5. Experiments bound to that application map automatically tag themselves with workload=<name> AND service=<name> for each workload/service in the manifest — enabling blast-radius reporting and the workload=/service= filters (see system tags below).
+
+SYSTEM TAGS auto-emitted by the backend on chaos_experiment create/update — use these as the primary filter for "find experiments that target X":
+- fault=<faultName>       (ALWAYS attached, one per fault step) — tags=fault=pod-delete; tags=fault=gcp matches all gcp-* faults (substring).
+- probe=<probeID>         (ALWAYS attached, one per probe reference) — tags=probe=<probeID>.
+- workload=<workloadName> (ONLY when bound to chaos_application_map) — from manifest Targets.Selectors.Workloads. tags=workload=payments-api.
+- service=<serviceName>   (ONLY when bound to chaos_application_map) — from the manifest's resolved service mapping. tags=service=payments-api.
+Filter is AND substring match across the experiment's tag array. Combine: tags=fault=pod-delete,workload=payments-api.
+Note: "workload" = Kubernetes Deployment/StatefulSet/DaemonSet (NOT a Pod). Chaos faults always target workloads; pods are ephemeral.
+
+COMMON GOTCHAS:
+- chaos_experiment list filters infra_id and environment_id are silently ignored when passed alone — backend requires BOTH together.
+- chaos_experiment list filters infra_name, infra_active, status are PARSED but NEVER applied by the backend aggregation. Don't pass them — agents would think they work and silently get unfiltered results. Use infra_id (paired with environment_id) for infra filtering.
+- chaos_application_map get treats environment_id + infra_id as de facto required: the backend's Mongo lookup is keyed on {identity, infra_id, environment_ref}, so missing either returns HTTP 500 with "mongo: no documents in result" (no validation error).
+- SD endpoints (discovered_*) require an agent_identity that is also a registered chaos_k8s_infrastructure.identity.
+- Chaos REST API uses organizationIdentifier (not orgIdentifier) — the registry handles this via scopeParams override; agents shouldn't notice.
+
+REASONING PLAYBOOK — answering "list experiments for <high-level X>" (e.g. "Harness Payment Bank", "the payments service"):
+X is rarely a chaos_experiment field directly. It's almost always a Harness project, a K8s service name, a workload name, or an application-map name. Resolve it before listing:
+
+  Step 1. Identify scope. If the user names a project/org → set project_id/org_id. If they name an environment ("prod") → list chaos_environment with search_term=<env keyword>. If they name a cluster → list chaos_k8s_infrastructure. Remember: env_id + infra_id must be passed TOGETHER on chaos_experiment list — either alone is silently dropped.
+
+  Step 2. Resolve X to concrete tag values. Two sub-paths:
+    (2a) Fast path — try tag-substring directly: chaos_experiment list with tags=workload=<keyword> (e.g. tags=workload=payment). The backend's substring match is forgiving. If the result count looks right, you're done.
+    (2b) Discovery path — when X is fuzzy or you need to enumerate workloads first:
+      (i)   chaos_application_map list filtered by env+infra → pick the map(s) matching X by name.
+      (ii)  chaos_application_map get on each candidate → response.services[].name gives service names; response.<resources>[].name gives workload names; response.identity is the app-map ID.
+      (iii) chaos_experiment list with target_network_map_ids=<map identity> (returns ALL experiments on that map; no tag filter needed) OR tags=service=<name>,workload=<name> for narrower hits.
+
+  Step 3. If the customer wants raw inventory (not chaos-augmented), use discovered_network_map list with agent_identity=<infra identity> + environment_id; then discovered_service for finer detail. Use this when the user asks "what services even exist in my cluster" before they pick targets.
+
+  Step 4. NEVER pass infra_name, infra_active, or status to chaos_experiment list — backend silently drops them. Use infra_id (paired with environment_id) instead.
+
+Common compound queries:
+  - "experiments touching payments in prod"     → env+infra together → tags=workload=payment
+  - "experiments running today on app map M"    → target_network_map_ids=M, start_date=today
+  - "my experiments, no automation noise"       → my_experiments=true, exclude_automation=true
+  - "every pod-delete experiment account-wide"  → tags=fault=pod-delete (no env/infra needed)
+  - "experiments using HTTP probe X"            → tags=probe=X`;
 
 // ── Resource Descriptions ────────────────────────────────────────────
 
-export const descChaosExperiment = `Chaos experiment definition. Supports list, get, delete, and execute actions: run, stop. Use chaos_experiment_variable list to discover required runtime inputs before running.`;
+export const descChaosExperiment = `Chaos experiment definition — a saved, manifest-backed test that injects one or more faults against selected workloads.
+Supports list, get, delete, create, and execute actions: run, stop. Use chaos_experiment_variable list to discover required runtime inputs before running.
+
+System tags (auto-emitted by the backend on create/update — use these as the primary filter for "experiments that target X"):
+- fault=<faultName> — ALWAYS attached, one per fault step in the manifest (e.g. fault=pod-delete, fault=gcp-vm-kill). Use tags=fault=<name> to find every experiment that runs a given fault. Substring matches, so tags=fault=gcp matches all gcp-* faults.
+- probe=<probeID> — ALWAYS attached, one per probe reference in the manifest. Use tags=probe=<probeID> to find every experiment using a specific health-check probe.
+- workload=<workloadName> — attached ONLY when the experiment is bound to a chaos_application_map (targetNetworkMapID is set on the experiment). Sourced from manifest Targets.Selectors.Workloads[].Names (V1) or TARGET_WORKLOAD_NAMES env (V2 enterprise faults). Use tags=workload=<name> to find every experiment that targets a specific Kubernetes workload (Deployment/StatefulSet/DaemonSet — NOT a Pod).
+- service=<serviceName> — attached ALONGSIDE workload= ONLY when bound to a chaos_application_map. Sourced from the manifest's resolved service mapping. Use tags=service=<name> to find experiments targeting a specific Kubernetes Service (label-selector → pods).
+
+Filter semantics: the tags filter is an AND substring match across the experiment's tag array. Pass multiple tags via comma-separated value (e.g. tags=fault=pod-delete,workload=payments-api).
+
+TWO WAYS to find experiments targeting a workload/service X:
+  (a) Tag filter — list with tags=workload=X (or tags=service=X). Works without knowing which app map X belongs to. Substring, so tags=workload=payment matches all payment-* workloads.
+  (b) App-map filter — list with target_network_map_ids=<map identity>. Use when you already know the app map; returns ALL experiments bound to it regardless of which workload they target.
+Approach (a) is broader (any tagged workload, no app-map needed); (b) is narrower (only experiments bound to a specific map).
+
+See descToolsetChaos REASONING PLAYBOOK for the full multi-step flow when the user query is high-level (e.g. "experiments for the Harness Payment Bank app").`;
 
 export const descChaosExperimentRun = `Experiment run timeline — full snapshot of an ongoing or completed chaos experiment run.
 Returns the execution pipeline with individual nodes (faults, probes, actions), each with status, timing, and chaos data.
@@ -16,7 +89,8 @@ Supports get.`;
 export const descChaosProbe = `Chaos resilience probe — declarative health checker that monitors application health before, during, and after a fault and determines the fault outcome.
 Types: HTTP, CMD, Prometheus, K8s, SLO, Datadog, Dynatrace, Container, APM. Infra: Kubernetes, Linux, Windows.
 Must be disabled before deleting; default (system) probes cannot be deleted or disabled.
-Supports list, get, delete, and execute actions: enable, verify, get_manifest.`;
+Supports list, get, delete, and execute actions: enable, verify, get_manifest.
+Note: server caps page size at 50; values above 50 are silently clipped.`;
 
 export const descChaosExperimentTemplate = `Reusable, versioned chaos experiment template stored in a ChaosHub (Git-backed repository).
 Templates are pre-configured experiment blueprints that standardize chaos practices across teams — they support version control, revision history, typed input variables, and rendered YAML.
@@ -29,14 +103,17 @@ export const descChaosExperimentVariable = `Variables for a chaos experiment. Li
 
 export const descChaosInfrastructure = `Linux/machine infrastructure registered for chaos experiments and load testing. For Kubernetes infrastructure, use chaos_k8s_infrastructure. Supports list.`;
 
-export const descChaosLoadtest = `Load test instance. Supports list, get, create, and delete. Run/stop via execute actions.`;
+export const descChaosLoadtest = `Load test (Resilience Testing) instance. Supports list, get, create, delete; run/stop via execute actions.
+Only the Locust tool type is supported today (JMeter and K6 are coming soon).
+To create one, first pick a load-runner infrastructure: for Linux VM use chaos_infrastructure (loadEnabled infras), for Kubernetes use chaos_enabled_infrastructure. Then pass its environment_id + infra_id with target_url and the Python (locust) script.`;
 
 export const descChaosK8sInfrastructure = `Kubernetes chaos infrastructure available for running experiments.
 Use chaos_environment list first to get an environmentId, then pass it here to filter infrastructures for that environment.
 Returns infrastructure details including identity, infraID, name, environmentID, status, infraType, infraScope, and isChaosEnabled.
 The infraID is used as the infra_ref parameter in create_from_template.
 IMPORTANT: Only infrastructures with status=ACTIVE AND isChaosEnabled=true can be used to create chaos experiments. Always check both fields before selecting an infrastructure.
-Supports filtering by status (ACTIVE, INACTIVE, PENDING), search, and optional inclusion of legacy V1 infrastructures.`;
+Supports filtering by status (ACTIVE, INACTIVE, PENDING), search, and optional inclusion of legacy V1 infrastructures.
+To list ONLY infrastructures that are ready to run experiments (chaos-enabled AND ACTIVE) with correct totals/pagination, use chaos_enabled_infrastructure instead.`;
 
 export const descChaosHub = `ChaosHub — a Git-backed repository that provides version-controlled chaos fault, experiment, probe, and action templates.
 Every project includes a default Enterprise ChaosHub with pre-built templates; custom hubs can be created to bring in organization-specific chaos artifacts.
@@ -51,7 +128,16 @@ Typical workflow: harness_list resource_type=chaos_hub → pick a hub → harnes
 
 export const descChaosFault = `Chaos fault definition (e.g. pod-delete, network-loss, CPU stress). Supports list, get, delete, plus get_variables, get_yaml, and list_experiment_runs execute actions.`;
 
-export const descChaosNetworkMap = `Network map (application map) for chaos blast radius visualization. Supports list and get.`;
+export const descChaosApplicationMap = `Chaos application map — a project-scoped, chaos-augmented view of a service-discovery network map, scoped to one (environment, infrastructure) pair.
+
+End-to-end lifecycle (an LLM should reason about this when answering "how do I run a chaos experiment against my services?"):
+  1. Customer installs a Service Discovery (SD) agent into a Kubernetes cluster (one agent per chaos_k8s_infrastructure).
+  2. SD agent uses eBPF to discover namespaces, services, workloads (Deployment/StatefulSet/DaemonSet — NOT pods), and inter-service connections. List these via discovered_namespace and discovered_service.
+  3. Customer (or an automated rule) selects a subset of discovered services + connections into an SD network map. Inspect via discovered_network_map.
+  4. The SD network map is "promoted" into a chaos application map (this resource), tied to one (environment, infrastructure). One application map per (env, infra, identity).
+  5. Chaos experiments can then be created against this application map. The presence of an application map on an experiment unlocks workload=<name> AND service=<name> system tags — see chaos_experiment.
+
+Returns name, identity, environmentRef, infrastructureId, status, agentIdentity, averageResiliencyScore, resiliencyCoverage, recentExperimentRunsDetails, totalExperimentCount; get adds eBPF-derived connections and per-service resiliency. Supports list and get.`;
 
 export const descChaosGuardCondition = `ChaosGuard condition — defines the infrastructure, fault, and application constraints that ChaosGuard rules evaluate against chaos experiments.
 Returns name, description, infraType, faultSpec, associated rules, tags, and audit info.
@@ -98,13 +184,13 @@ Supports search by name and sort by lastModifiedAt or name.`;
 export const descListExperiments = `List chaos experiments with optional filtering.
 Supports filtering by experiment name, status, infrastructure (ID, name, active state), tags, environment, date range, and bulk experiment IDs.
 Default page size is 15, max 50.`;
-export const descGetExperiment = `Get chaos experiment details including revisions and recent run details`;
+export const descGetExperiment = `Get chaos experiment details including revisions and recent run details. The backend for this endpoint REQUIRES the internal UUID (experimentID, e.g. "ef9199b6-0248-4c0b-9d63-9176bf2b7123") — the human-readable identity slug from a UI URL will not work here. If you only have the slug, first call harness_list with resource_type=chaos_experiment and experiment_name=<slug> to obtain the experimentID.`;
 
 export const descGetExperimentRun = `Get the full timeline of a chaos experiment run. This is a read-only endpoint — it does NOT trigger a run.
 Returns the execution pipeline: individual fault/probe/action nodes with status, timing, chaos data, and error details.
 Also returns experiment name, infraID, resiliency score, run phase, manifest version, and template details.
 Pass experiment_id via resource_id. Pass run_id or notify_id via params (not resource_id) to identify the specific run.
-To start a new run, use chaos_experiment execute action: run instead.`;
+To start a new run, use chaos_experiment execute action: run instead. By default, chaos_experiment.run accepts the human-readable identity slug as experiment_id (isIdentity=true). Pass is_identity=false in params if you have the internal UUID (experimentID, e.g. "ef9199b6-0248-4c0b-9d63-9176bf2b7123"). See descIsIdentity for details.`;
 
 export const descListProbes = `List chaos probes with optional filtering.
 Supports filtering by name, tags, date range, probe IDs, infrastructure type, probe entity type, and sorting.
@@ -115,7 +201,153 @@ Returns probe type, infrastructure type, enabled/verified status, tags, run prop
 
 export const descSearchProbes = `Search probes by name (case-insensitive).`;
 export const descProbeIds = `Comma-separated probe IDs for bulk lookup (e.g. "id1,id2,id3").`;
-export const descProbeSortField = `Field to sort probe results by. Values: NAME, TIME, ENABLED. Defaults to TIME.`;
+export const descProbeSortField = `Field to sort probe results by. Accepted values: NAME, TIME, ENABLED. Defaults to TIME server-side.`;
+
+export const descCreateProbe = `Creates a new chaos resilience probe (POST /rest/v2/probes).
+
+IMPORTANT: You MUST NOT auto-fill, assume, or pre-pick any value on behalf of the user.
+At every step below, you MUST display the relevant options and wait for explicit user confirmation before proceeding.
+NOTE: based on previous user activity still don't assume their org/project/infra/probe-type/values — they may want different choices every time.
+
+ENUM FIELDS — use multi-option elicitation (NOT open-text prompts). When a field has a fixed set of valid values, present them as discrete clickable options (radio / button list / multi-choice) so the user picks rather than types. Apply this to:
+  - infrastructure_type → Kubernetes | Linux | Windows
+  - type (filtered per Step 1 matrix for the chosen infra)
+  - operation (k8sProbe) → create | delete | present | absent
+  - comparator.type → int | float | string
+  - auth.type → Basic | Bearer (or "no auth" as a third choice)
+  - method (httpProbe) → GET | POST
+  - HTTP body source (POST) → body (inline) | bodyPath (file)
+  - assertion target (httpProbe) → responseCode | responseBody
+  - verbosity → info | debug
+  - boolean fields (is_enabled, stopOnFailure, insecureSkipVerify, source.inheritInputs, source.hostNetwork, source.privileged, variable.required, etc.) → true | false
+Free-text input is fine for naturally open fields (probe_id, name, URL, command, query, comparator.value, description, tags, etc.).
+
+Required workflow — follow in order, pausing for user input after EACH step. Do NOT proceed to the next step until the current step is fully answered by the user:
+
+Step 1 — Choose infrastructure_type, then probe type (REJECT invalid combinations):
+  Ask the user to pick infrastructure_type from: Kubernetes | Linux | Windows.
+  Then ask which probe type to create, restricted to the matrix below for the chosen infra:
+    Kubernetes → httpProbe | cmdProbe | promProbe | k8sProbe | datadogProbe | dynatraceProbe | apmProbe | containerProbe
+    Linux     → httpProbe | cmdProbe | datadogProbe | dynatraceProbe
+    Windows   → httpProbe | cmdProbe
+  These are the ONLY valid (infra, type) pairings — any other pairing must be rejected ("not supported on this infrastructure_type").
+  Do NOT proceed until both infrastructure_type AND type are explicitly chosen by the user.
+
+Step 2 — Collect identity:
+  Ask the user for probe_id (slug, must match [a-z0-9-]+, unique within the project), name (only default to probe_id if the user explicitly accepts), description (optional — ask explicitly, don't skip silently), tags (optional, "key:value" pairs — ask explicitly).
+  Do NOT generate or assume any of these.
+  Strictly follow the order of steps and don't skip any step. Now move to Step 3.
+
+Step 3 — Collect variables (optional):
+  Ask the user whether they want to define probe-level variables. Do NOT skip this question.
+  If yes: for each variable ask name, type (String | Number), value (literal, or "<+input>" for runtime), required (true/false), description (optional).
+  If no: set variables: [].
+  Strictly follow the order of steps and don't skip any step. Now move to Step 4.
+
+Step 4 — Collect probeProperties (type-specific — ask each field one turn at a time):
+  - httpProbe: URL, HTTP method (GET|POST), criteria operator + target (responseCode XOR responseBody), auth (Basic|Bearer, or omit for none), TLS (caFile/certFile/keyFile/insecureSkipVerify), headers (key/value pairs). If method=POST also: contentType (e.g. "application/json") + payload via body (inline) XOR bodyPath (file path).
+  - cmdProbe: command (shell command), comparator (type=int|float|string + criteria + value), execution mode (inline = omit source; source pod = build spec object with image required + optional command/args/env/inheritInputs/hostNetwork/privileged/imagePullPolicy/imagePullSecrets/nodeSelector/tolerations/volumes/volumeMount/labels/annotations, then JSON.stringify it — source is a JSON-encoded STRING on the wire, NOT a JSON object), env vars (top-level cmdProbe.env for inline mode; inside source.env using corev1.EnvVar shape for source mode — top-level cmdProbe.env is ignored when source is set).
+  - promProbe: endpoint (Prometheus base URL, e.g. "http://prometheus-server.monitoring.svc:9090"; probe appends /api/v1/query), PromQL source — exactly ONE of query (inline string) XOR queryPath (file path inside probe container); ASK which one and never set both. comparator: type MUST be "float" (PromQL is numeric — reject any other type), criteria from {== | != | >= | <= | > | <}, value as a numeric string (e.g. "0.05" for a 5% error-budget). Optional auth: type=Basic|Bearer + credentials (plain or "<+secrets.getValue('...')>"); omit auth entirely for unauthenticated in-cluster Prometheus. Optional tlsConfig: caFile, certFile, keyFile, insecureSkipVerify.
+  - k8sProbe (Kubernetes infra ONLY): version (required, e.g. "v1"), resource (required, plural lowercase, e.g. "deployments"), operation (required, one of: "create" | "delete" | "present" | "absent"). Optional: group (e.g. "apps" for Deployments; omit for core resources like Pods/ConfigMaps), namespace, resourceNames (comma-separated specific names), fieldSelector (e.g. "metadata.name=checkout"), labelSelector (e.g. "app=checkout"). Prefer "present"/"absent" for steady-state liveness assertions; reserve "create"/"delete" for action probes.
+  - datadogProbe (Kubernetes + Linux): datadogSite (required, host only — e.g. "us5.datadoghq.com", "datadoghq.com", "datadoghq.eu", "ap1.datadoghq.com"; see https://docs.datadoghq.com/getting_started/site/), datadogCredentialsSecretName (REQUIRED on Kubernetes — name of k8s secret containing "dd-api-key" and "dd-app-key"; ignored on Linux). Source — EXACTLY ONE of metrics XOR syntheticsTest; ASK which one and never set both. metrics: query (Datadog metrics query string), timeFrame (relative range matching /^now-\\d+[smh]$/ — e.g. "now-1m", "now-5m", "now-1h"; plain "now" is INVALID), comparator (type MUST be "float", criteria from {== | != | >= | <= | > | <}, value as numeric string). syntheticsTest: testType ("api" | "browser") + publicId (Datadog Public ID of the test).
+  - dynatraceProbe (Kubernetes + Linux infra; NOT Windows): endpoint (required, Dynatrace tenant URL — e.g. "https://abc.live.dynatrace.com" SaaS or "https://abc.dynatrace-managed.com/e/<env-id>" Managed), timeFrame (required, e.g. "now-1m" / "now-5m" / "now-1h" — Dynatrace expression syntax setting the aggregation window), metrics (required object with metricsSelector e.g. "builtin:host.cpu.usage" + entitySelector e.g. "type(HOST)"; both required), comparator (required: type MUST be "float" since Dynatrace metrics are numeric, criteria from {== | != | >= | <= | > | <}, value as a numeric string). Optional: apiTokenSecretName (Kubernetes secret holding the Dynatrace API token).
+  - apmProbe (NOT promProbe — see Step 1 reminder): apmProbe wraps an APM backend via a Harness CONNECTOR. If the user has only a Prometheus URL and no Harness Prometheus connector, redirect them to promProbe and stop. Otherwise ASK apm_type from { Prometheus | AppDynamics | SplunkObservability | Dynatrace | NewRelic | GcpCloudMonitoring | Datadog | SplunkEnterprise }. Phase 1 — Prometheus is the only structured sub-type; the others are passthrough (walk the user through inputs per the Harness API).
+    Prometheus sub-flow (apm_type=Prometheus — uses a Harness Prometheus CONNECTOR, NOT a raw URL; run sub-steps in order, pause after each):
+      Step 4-B (connector picker — REQUIRED MCP call): Call harness_list resource_type=connector with type=Prometheus, include_all_connectors_available_at_scope=true (and the user's resource_scope; default project). Show the returned connectors (name, identifier, scope) and ASK the user to pick ONE — store its identifier as connectorID (the bare identifier string, NOT a connectorRef expression and NOT a URL). Do NOT proceed without an explicit pick. If the list is empty, tell the user no Prometheus connector exists and offer either to create one (separate flow) or to use promProbe instead.
+      Step 4-C (TLS config — optional): ASK whether the user wants TLS (yes|no). If yes, for EACH of caCrt / clientCrt / key (any subset is allowed): call harness_list resource_type=secret with type=SecretText, include_all_secrets_accessible_at_scope=true. Show the list, ASK the user to pick ONE secret per field. Wrap each as { identifier: "secrets.getValue(\\"<secretId>\\")" } — this shape is apmProbe-specific and DIFFERS from promProbe.tlsConfig (which uses plain caFile/certFile/keyFile string paths). Then ASK insecureSkipVerify (true|false).
+      Step 4-D (query — REQUIRED): ASK the user for the PromQL query (free text). Same query language as promProbe.query, but it will execute against the connector-resolved endpoint, not a URL provided here.
+      Step 4-E (comparator — REQUIRED): comparator.type is locked to "float" (do NOT ask). ASK criteria from { == | != | >= | <= | > | < } and value (numeric string).
+      Assemble probe_properties.apmProbe = { comparator, type: "Prometheus", prometheusProbeInputs: { connectorID, query, tlsConfig? } } and continue to Step 5.
+    For other apm_type values (AppDynamics/SplunkObservability/Dynatrace/NewRelic/GcpCloudMonitoring/Datadog/SplunkEnterprise) the connector list call uses a per-type connector type — for SplunkObservability use connector type "SignalFX", for SplunkEnterprise use "Splunk", others use the apm_type name verbatim. Inputs object key is <camel(apm_type)>ProbeInputs (e.g. appDynamicsProbeInputs, datadogApmProbeInputs). These remain passthrough until Phase 2.
+  - Other types (sloProbe, containerProbe): supply the matching camelCase key under probe_properties per the Harness API. Walk the user through the relevant fields — do NOT pre-pick anything.
+  Do NOT pre-pick ANY field, even ones with sensible defaults.
+ Strictly follow the order of steps and don't skip any step. Now move to Step 5.
+
+Step 5 — Collect runProperties (applies to ALL probes — ask each field):
+  timeout (e.g. "10s"), interval (e.g. "2s"), attempt (integer), pollingInterval (e.g. "30s"), initialDelay (e.g. "5s"), stopOnFailure (true/false), verbosity (info | debug).
+  Do NOT default any of these silently — even though server-side defaults exist, ASK each one.
+
+Step 6 — PREVIEW + CONFIRM (MANDATORY gate before submit):
+  Render the full assembled body to the user as a fenced JSON code block. STOP and wait for an EXPLICIT confirmation ("yes" / "create it" / "go" / "confirm"). Do NOT call harness_create until the user explicitly approves.
+  If the user asks for changes, edit the body and re-show the updated preview — repeat until they approve.
+  Strictly follow the order of steps and don't skip any step. Never submit unsolicited.
+
+EXCEPTION — clone mode:
+  If the user says "like <X>" / "similar to <X>" / "duplicate <X>" / "same as before <X>": call harness_get(resource_type=chaos_probe, probe_id=<X>) to fetch the source probe, copy its probe_properties + run_properties + variables + tags VERBATIM, then ASK only about fields the user wants to change (typically probe_id + name). Step 6 (PREVIEW + CONFIRM) still applies — show the assembled body and wait for explicit approval before submit.
+
+Only after Steps 1–5 are completed AND Step 6 has explicit user approval should you call harness_create.
+
+INPUT FIELDS:
+  probe_id (string, required): unique probe identifier within the project, [a-z0-9-]+.
+  name (string, required): human-readable probe name.
+  type (string, required): probe type discriminator — see Step 1 for valid (infra, type) combinations.
+  infrastructure_type (string, required): Kubernetes | Linux | Windows.
+  description (string, optional): free-form description.
+  tags (string[] | comma-separated string, optional): tags array, "key:value" each.
+  is_enabled (boolean, optional): defaults to true server-side.
+  probe_properties (object, required): exactly one inner key matching \`type\`.
+  run_properties (object, optional): timeout, interval, attempt, pollingInterval, initialDelay, stopOnFailure, verbosity.
+  variables (array, optional): probe-level template variables: [{ name, type, value, required, description }].
+  inputs (array, optional): advanced template inputs. Usually [].
+
+ERRORS:
+  400: Missing required fields or invalid (infra, type) pairing.
+  401: Unauthorized.
+  500: Internal server error (e.g. for cmdProbe: "failed to convert cmd probe source to string" — means source was passed as a JSON object instead of a JSON-encoded string).`;
+
+export const descBodyProbeCreate = `Body for chaos probe create.
+
+Required: probe_id (slug), name, type, infrastructure_type, probe_properties.<typeKey>.
+Optional: description, tags, is_enabled (default true server-side), run_properties, variables, inputs.
+
+probe_properties contains exactly ONE inner key matching type. For type=httpProbe set probe_properties.httpProbe; for type=cmdProbe set probe_properties.cmdProbe; for type=promProbe set probe_properties.promProbe (raw Prometheus URL, no connector); for type=k8sProbe set probe_properties.k8sProbe; for type=datadogProbe set probe_properties.datadogProbe; for type=dynatraceProbe set probe_properties.dynatraceProbe; for type=apmProbe set probe_properties.apmProbe (DIFFERENT from promProbe — apmProbe wraps a Harness CONNECTOR; Prometheus sub-type fully documented below; AppDynamics/SplunkObservability/Dynatrace/NewRelic/GcpCloudMonitoring/Datadog/SplunkEnterprise sub-types pass through). Other types (sloProbe, containerProbe): supply the matching camelCase key per the Harness API — accepted as passthrough.
+
+run_properties (all optional, server defaults): timeout, interval, attempt, pollingInterval, initialDelay, stopOnFailure, verbosity (info|debug).
+
+For httpProbe, also ask the user about: response body assertion (responseBody — alternative to responseCode), auth (Basic|Bearer or omit), tlsConfig (mTLS / custom CA / insecureSkipVerify), headers. If method=POST: contentType (e.g. application/json) and payload via body XOR bodyPath.
+
+For cmdProbe, also ask the user about: execution mode (inline if a generic shell will do; source pod when the command needs an app-specific image like redis-cli, psql, kubectl), source.image when sourced, source.inheritInputs (reuse experiment env/volumes), env vars (top-level cmdProbe.env for inline; source.env with full corev1.EnvVar shape supporting valueFrom.secretKeyRef / configMapKeyRef for source mode). WIRE FORMAT for source: a JSON-ENCODED STRING, NOT a JSON object. Build the source spec object then JSON.stringify() it. Backend rejects object payloads with "failed to convert cmd probe source to string".
+
+For promProbe, also ask the user about: endpoint (in-cluster example "http://prometheus-server.monitoring.svc:9090"; the probe appends /api/v1/query), PromQL source via query (inline) XOR queryPath (file path inside the probe container) — exactly one, never both. comparator.type is locked to "float" (reject any other value); comparator.criteria from {== | != | >= | <= | > | <}; comparator.value is a numeric string. Optional auth (type=Basic|Bearer + credentials, or omit entirely). Optional tlsConfig (caFile/certFile/keyFile/insecureSkipVerify) for HTTPS / mTLS Prometheus. Common pattern: bound a golden signal (error rate, latency, saturation) during chaos.
+
+For k8sProbe, also ask the user about: GVR triplet — group (optional, e.g. "apps" for Deployments; omit for core resources like Pods/ConfigMaps), version (required, e.g. "v1"), resource (required, plural lowercase). operation (required, one of "create" | "delete" | "present" | "absent" — prefer present/absent for steady-state liveness assertions). Selectors: namespace, resourceNames (comma-separated specific names), fieldSelector (e.g. "metadata.name=checkout"), labelSelector (e.g. "app=checkout"). Note: k8sProbe is Kubernetes infra only.
+
+For datadogProbe, also ask the user about: datadogSite (host-only Datadog region identifier — e.g. "us5.datadoghq.com", "datadoghq.com", "datadoghq.eu"; see https://docs.datadoghq.com/getting_started/site/), datadogCredentialsSecretName (REQUIRED on Kubernetes — Kubernetes secret containing "dd-api-key" and "dd-app-key"; ignored on Linux). Which assertion source: metrics XOR syntheticsTest. metrics requires query (Datadog metrics query), timeFrame (relative range matching /^now-\\d+[smh]$/ — e.g. "now-1m"; plain "now" is INVALID), comparator (type locked to "float", numeric criteria, numeric-string value). syntheticsTest requires testType ("api" | "browser") + publicId (Datadog test Public ID). Common patterns: bound a Datadog metric (CPU/latency/error-rate) during chaos; verify a Datadog synthetic test still passes.
+
+For dynatraceProbe, also ask the user about: endpoint (Dynatrace tenant URL — SaaS "https://abc.live.dynatrace.com" or Managed "https://abc.dynatrace-managed.com/e/<env-id>"), timeFrame (aggregation window in Dynatrace syntax, e.g. "now-1m" / "now-5m"), apiTokenSecretName (optional — Kubernetes secret holding the Dynatrace API token), metrics.metricsSelector (e.g. "builtin:host.cpu.usage", "builtin:service.errors.total.rate"), metrics.entitySelector (scopes the metric to specific entities, e.g. "type(HOST)", "type(SERVICE),tag(\\"env:prod\\")"). comparator.type is locked to "float" (Dynatrace metrics are numeric); comparator.criteria from {== | != | >= | <= | > | <}; comparator.value as a numeric string. Common pattern: bound a SaaS observability metric (CPU, latency, error count) during chaos.
+
+For apmProbe (Prometheus sub-type), also ask the user about: apmProbe.type=Prometheus (discriminator). NOTE — apmProbe is NOT promProbe: apmProbe wraps a Harness Prometheus CONNECTOR (you pass connectorID); promProbe queries a Prometheus URL DIRECTLY (you pass endpoint). If the user has only a URL and no connector, switch them to promProbe. Inputs: prometheusProbeInputs.connectorID (Harness Prometheus connector identifier — discover via harness_list resource_type=connector type=Prometheus include_all_connectors_available_at_scope=true; pass the bare identifier, NOT a connectorRef expression and NOT a URL). prometheusProbeInputs.query (PromQL string). prometheusProbeInputs.tlsConfig (optional, shape DIFFERS from promProbe.tlsConfig) — caCrt/clientCrt/key each wrapped as { identifier: "secrets.getValue(\\"<secretId>\\")" } (discover secrets via harness_list resource_type=secret type=SecretText include_all_secrets_accessible_at_scope=true), plus insecureSkipVerify (boolean). comparator.type is locked to "float" (Prometheus metrics are numeric); criteria from {== | != | >= | <= | > | <}; value as a numeric string. Common pattern: bound a Prometheus metric (CPU, latency, error rate) during chaos via a managed Harness Prometheus connector.
+
+Runtime: any value inside probe_properties or run_properties may be a Harness runtime expression like "<+input>" (resolved at experiment run time) — useful for parameterising probes via variables/inputs.
+
+Minimal httpProbe body:
+{"probe_id":"my-http-probe","name":"my-http-probe","type":"httpProbe","infrastructure_type":"Kubernetes","probe_properties":{"httpProbe":{"url":"https://example.com/health","method":{"get":{"criteria":"==","responseCode":"200"}}}}}
+
+Minimal cmdProbe body (source MUST be a JSON-encoded string, not a JSON object):
+{"probe_id":"my-cmd-probe","name":"my-cmd-probe","type":"cmdProbe","infrastructure_type":"Kubernetes","probe_properties":{"cmdProbe":{"command":"redis-cli -h redis ping","comparator":{"type":"string","criteria":"equal","value":"PONG"},"source":"{\\"image\\":\\"redis:7-alpine\\",\\"inheritInputs\\":true}"}}}
+
+Minimal promProbe body (continuous 5xx-rate guard under 5%):
+{"probe_id":"checkout-err-rate","name":"checkout-err-rate","type":"promProbe","infrastructure_type":"Kubernetes","probe_properties":{"promProbe":{"endpoint":"http://prometheus-server.monitoring.svc:9090","query":"sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))","comparator":{"type":"float","criteria":"<","value":"0.05"}}}}
+
+Minimal k8sProbe body (assert checkout Deployment is present during chaos):
+{"probe_id":"checkout-deployment-present","name":"checkout-deployment-present","type":"k8sProbe","infrastructure_type":"Kubernetes","probe_properties":{"k8sProbe":{"group":"apps","version":"v1","resource":"deployments","namespace":"boutique","labelSelector":"app=checkout","operation":"present"}}}
+
+Minimal datadogProbe body (Kubernetes — CPU stays below 80% during chaos):
+{"probe_id":"checkout-cpu-bound","name":"checkout-cpu-bound","type":"datadogProbe","infrastructure_type":"Kubernetes","probe_properties":{"datadogProbe":{"datadogSite":"us5.datadoghq.com","datadogCredentialsSecretName":"datadog-creds","metrics":{"query":"avg:system.cpu.user{service:checkout}","timeFrame":"now-1m","comparator":{"type":"float","criteria":"<","value":"80"}}}}}
+
+Minimal datadogProbe body (Kubernetes — synthetic browser test still passes during chaos):
+{"probe_id":"checkout-synth-ok","name":"checkout-synth-ok","type":"datadogProbe","infrastructure_type":"Kubernetes","probe_properties":{"datadogProbe":{"datadogSite":"us5.datadoghq.com","datadogCredentialsSecretName":"datadog-creds","syntheticsTest":{"testType":"browser","publicId":"abc-123-xyz"}}}}
+
+Minimal dynatraceProbe body (host CPU stays under 80% during chaos):
+{"probe_id":"host-cpu-bound","name":"host-cpu-bound","type":"dynatraceProbe","infrastructure_type":"Kubernetes","probe_properties":{"dynatraceProbe":{"endpoint":"https://abc.live.dynatrace.com","timeFrame":"now-1m","apiTokenSecretName":"dynatrace-creds","metrics":{"metricsSelector":"builtin:host.cpu.usage","entitySelector":"type(HOST)"},"comparator":{"type":"float","criteria":"<","value":"80"}}}}
+
+Minimal apmProbe body (Prometheus sub-type — uses a Harness Prometheus CONNECTOR; for a raw URL use promProbe instead):
+{"probe_id":"my-apm-probe","name":"my-apm-probe","type":"apmProbe","infrastructure_type":"Kubernetes","probe_properties":{"apmProbe":{"comparator":{"type":"float","criteria":"==","value":"90"},"type":"Prometheus","prometheusProbeInputs":{"query":"up","connectorID":"gcpmgrpromconnector","tlsConfig":{"caCrt":{"identifier":"secrets.getValue(\\"ca-cert\\")"},"clientCrt":{"identifier":"secrets.getValue(\\"client-cert\\")"},"key":{"identifier":"secrets.getValue(\\"client-key\\")"},"insecureSkipVerify":true}}}}}`;
+
+export const descProbeIdField = `Unique probe identifier. Lowercase alphanumeric + hyphen ([a-z0-9-]+). Must be unique within the project scope.`;
+export const descProbeNameField = `Human-readable probe name. Defaults to probe_id when omitted.`;
+export const descProbePropertiesField = `Type-specific probe configuration. Provide exactly one inner key matching the value of "type" (e.g. for type=dynatraceProbe set probe_properties.dynatraceProbe). promProbe and apmProbe are DIFFERENT — promProbe queries a Prometheus URL directly; apmProbe.type=Prometheus uses a managed Harness Prometheus connector. httpProbe, cmdProbe, promProbe, k8sProbe, datadogProbe, dynatraceProbe, and apmProbe (Prometheus sub-type only) are fully documented in this schema; other type shapes (sloProbe, containerProbe, and the remaining apmProbe sub-types — AppDynamics/SplunkObservability/Dynatrace/NewRelic/GcpCloudMonitoring/Datadog/SplunkEnterprise) are accepted as camelCase passthrough per the Harness API.`;
+export const descRunPropertiesField = `Probe execution cadence and retry behavior. All fields optional with server-side defaults: timeout (e.g. "10s"), interval (e.g. "2s"), attempt (retry count), pollingInterval, initialDelay, stopOnFailure (boolean), verbosity ("info" | "debug").`;
 
 export const descListExperimentTemplates = `List chaos experiment templates from chaos hubs.
 Returns a paginated list of templates with identity, name, description, tags, revision, infraType, hub identity, and audit info.
@@ -131,13 +363,68 @@ export const descDeleteExperimentTemplate = `Delete a chaos experiment template 
 Requires hub_identity to identify which chaos hub owns the template.
 Returns a success confirmation on completion.`;
 
-export const descListExperimentVariables = `List variables for a chaos experiment (experiment-level and task-level)`;
+export const descListExperimentVariables = `List variables for a chaos experiment (experiment-level and task-level). By default treats experiment_id as a human-readable identity slug (e.g. "exp-without-runtime"); pass is_identity=false to use the internal UUID instead.`;
 
 export const descListLinuxInfra = `List chaos Linux infrastructures (load runners)`;
 
 export const descListLoadtests = `List load test instances`;
 export const descGetLoadtest = `Get load test instance details`;
-export const descCreateLoadtest = `Create a sample load test instance`;
+export const descCreateLoadtest = `Creates a Locust load test (Resilience Testing) on a Linux VM or Kubernetes load-runner infrastructure.
+
+IMPORTANT: You MUST NOT auto-select, assume, or pre-fill any value on behalf of the user.
+At every step below, present the options / ask for the value and wait for explicit user confirmation before proceeding.
+Do NOT assume org/project/infrastructure/script/URL based on previous activity — the user may choose differently each time.
+Only the Locust tool type is supported today (JMeter and K6 are coming soon) — do not offer or assume the others.
+
+Required workflow — follow in order, pausing for user input after each step:
+
+Step 1 — Select the execution environment target type:
+  Ask whether the load test runs on "Linux VM" (target_type=machine-chaos-linux) or "Kubernetes" (target_type=kubernetes). Wait for the user to choose.
+
+Step 2 — Select a load-runner infrastructure:
+  Linux VM: call harness_list resource_type=chaos_infrastructure, show the list, wait for the user to pick one. Only infras with loadEnabled=true and status ACTIVE can run load tests.
+  Kubernetes: call harness_list resource_type=chaos_enabled_infrastructure, show the list, wait for the user to pick one (results are always ACTIVE and chaos-enabled).
+  From the chosen row take environmentID -> environment_id and infraID -> infra_id. Do NOT choose an infrastructure yourself.
+
+Step 3 — Collect the target (host) URL:
+  Ask for the base URL of the application under test (e.g. https://www.google.com) -> target_url. Do NOT assume it.
+
+Step 4 — Choose how to define the test (Test Configuration):
+  Linux VM supports the inline Python script only. Kubernetes supports two modes — ask which:
+  (a) Upload Python script (script_source=inline): ask the user to paste the raw Python locust script (their locustfile.py contents). Pass it verbatim in 'script' — base64-encoded into scriptContent automatically. Do NOT generate, modify, or assume a script.
+  (b) Custom Image (script_source=image, Kubernetes only): ask for the container image -> script_image (e.g. my-registry/my-load-test:latest); optionally an entrypoint -> script_entrypoint (e.g. locustfile.py); and optional arguments -> load_args (key=value pairs, comma-separated per key, separated by ';', e.g. "tags=smoke,fast;headless=true").
+
+Step 5 — Collect the load configuration:
+  Ask for Number of Users (users), Test Duration in seconds (duration_sec), and Ramp Up Duration in seconds (ramp_up_sec).
+  Defaults only if the user explicitly accepts them: users=100, duration_sec=600, ramp_up_sec=120.
+  Kubernetes only: optionally ask for worker_count (distributed worker pods; 0 = standalone, default 0).
+
+Step 6 — Collect name and optional metadata:
+  Ask for a name. identity is auto-derived from name (alphanumeric) unless the user provides one. description and tags are optional — ask, but do not require them.
+
+Only after the user confirms all of the above should you call harness_create resource_type=chaos_loadtest.
+
+INPUT FIELDS:
+  name (string, required): Display name for the load test.
+  environment_id (string, required): environmentID of the chosen infrastructure (Step 2).
+  infra_id (string, required): infraID of the chosen infrastructure (Step 2).
+  target_url (string, required): Base URL of the application under test (Step 3).
+  script (string): Inline Python locust script; base64-encoded automatically into scriptContent. Required when script_source=inline.
+  script_source (string): "inline" (default) or "image" (Kubernetes). Inferred as "image" when script_image is set.
+  script_image (string): Custom Image mode — prebuilt container image. Required when script_source=image.
+  script_entrypoint (string): Custom Image mode — entrypoint file inside the image (optional).
+  load_args (string): Custom Image mode — container args as "k=v,v2;k2=v" pairs (optional).
+  target_type (string): machine-chaos-linux (Linux VM, default) or kubernetes.
+  tool_type (string): Only "Locust" is supported. Default: Locust.
+  users (number): Number of simulated users. Default 100.
+  duration_sec (number): Total test duration in seconds. Default 600.
+  ramp_up_sec (number): Ramp-up duration in seconds. Default 120.
+  worker_count (number): Kubernetes only — distributed worker pods (0 = standalone, default 0), sent as variables.workerCount.
+  identity (string): Stable identifier; auto-derived from name when omitted.
+  description (string): Optional description.
+  tags (string[]): Optional tags.
+
+Returns the created load test (identity, name, environment/infra, targetType, targetUrl, toolType, load config) plus an openInHarness deep link.`;
 export const descDeleteLoadtest = `Delete a load test instance`;
 
 export const descListK8sInfra = `List Kubernetes chaos infrastructures available for running experiments.
@@ -146,6 +433,26 @@ Returns infrastructure details including identity, infraID, name, environmentID,
 IMPORTANT: Only infrastructures with status=ACTIVE AND isChaosEnabled=true can be used to create chaos experiments.
 Supports filtering by status (ACTIVE, INACTIVE, PENDING) and optional inclusion of legacy V1 infrastructures.`;
 export const descGetK8sInfra = `Get Kubernetes chaos infrastructure details`;
+
+export const descChaosEnabledInfrastructure = `Kubernetes chaos infrastructures that are READY to run experiments — i.e. chaos-enabled AND status=ACTIVE. Every result has isChaosEnabled=true and status=ACTIVE, so no post-filtering is needed.
+Backed by a dedicated endpoint (POST /rest/v2/infrastructures/chaos-enabled) that queries the chaos infrastructure store directly, so pagination and total counts reflect ONLY ready-to-use infra (correct totals).
+Returns infrastructure details including identity, infraID, name, environmentID, status, infraType, infraScope, and isChaosEnabled. The infraID/identity is what you pass as infra_ref in chaos_experiment create_from_template, or as the infra selector when creating/running an experiment.
+Use chaos_environment list first to get an environmentId, then pass it here to scope to that environment.
+WHEN TO USE THIS vs chaos_k8s_infrastructure:
+- Use chaos_enabled_infrastructure when the goal is to PICK an infrastructure to run a chaos experiment, or to count/list ONLY infra that can actually run experiments (correct totals).
+- Use chaos_k8s_infrastructure for the FULL inventory (including not-yet-chaos-enabled and INACTIVE/PENDING infra), single-infra detail (get), health checks (check_health), or filtering by a specific non-ACTIVE status. Its pagination/totals span all platform infra, not just chaos-ready ones, so client-side isChaosEnabled filtering there gives wrong page sizes/counts.
+Supports list only. Filter by environment_id, infra_type (KubernetesV2/All query the V2 chaos store; Kubernetes returns legacy V1), infra_scope, is_ai_enabled, and search. There is no status filter because results are always ACTIVE.`;
+
+export const descListChaosEnabledInfra = `List Kubernetes chaos infrastructures that are ready to run experiments (chaos-enabled AND status=ACTIVE).
+Unlike chaos_k8s_infrastructure (which lists ALL infra and stamps isChaosEnabled per row), this returns ONLY ready-to-use infra with pagination/total scoped to that set.
+Returns identity, infraID, name, environmentID, status (always ACTIVE), infraType, infraScope, and isChaosEnabled. Use the infraID/identity as infra_ref when creating experiments.
+Filter by environment_id, infra_type, infra_scope, is_ai_enabled, and search.`;
+
+export const descChaosEnabledInfraType = `Filter by Kubernetes infrastructure type. 'KubernetesV2' and 'All' query the V2 chaos store; 'Kubernetes' returns legacy V1 infrastructures instead. Omit to return all chaos-enabled V2 infrastructures.`;
+
+export const descInfraScope = `Filter by infrastructure scope: 'NAMESPACE' (chaos limited to a single namespace) or 'CLUSTER' (cluster-wide chaos).`;
+
+export const descInfraAiEnabled = `When true, return only AI-enabled chaos infrastructures; when false, only non-AI-enabled ones.`;
 
 export const descListHubs = `List ChaosHubs (Git-connected repositories containing fault, experiment, probe, and action templates).
 Returns hub details including repository info, connector configuration, template counts, and sync status.
@@ -187,8 +494,19 @@ export const descDeleteFaultTemplate = `Delete a chaos fault template by identit
 Requires hub_identity to identify which chaos hub owns the template.
 Returns a success confirmation on completion.`;
 
-export const descListNetworkMaps = `List chaos network maps`;
-export const descGetNetworkMap = `Get chaos network map details`;
+export const descListApplicationMaps = `List chaos application maps in the project.
+Returns a paginated list with name, identity, environmentRef, infrastructureId, status, resiliency scores, recent experiment runs, and audit info.
+Supports filtering by environment_id, infra_id, search (name substring), and the boolean toggles all (include archived) and minimal (lightweight projection).`;
+
+export const descGetApplicationMap = `Get a single chaos application map by identity.
+environment_id and infra_id MUST be passed via params — the backend composes its Mongo lookup as {identity, infra_id, environment_ref} (composite key); missing either yields HTTP 500 with a "mongo: no documents in result" message (de facto required, not validation-enforced).
+Returns the application map plus its eBPF-derived connections and per-service resiliency metadata (averageResiliencyScore, resiliencyCoverage).`;
+
+export const descAppMapSearch        = `Substring match on application-map name (case-insensitive). Optional.`;
+export const descAppMapEnvironmentId = `Harness environment identifier scoping the map. Optional for list (filters results); required for get.`;
+export const descAppMapInfraId       = `Chaos infrastructure identifier (chaos_k8s_infrastructure.identity) scoping the map. Optional for list (filters results); required for get.`;
+export const descAppMapAll           = `When true, include archived/soft-deleted application maps. Default: false.`;
+export const descAppMapMinimal       = `When true, return a lightweight projection (omit heavy fields like recent runs / resiliency arrays). Default: false.`;
 
 export const descListGuardConditions = `List ChaosGuard conditions.
 Conditions define the infrastructure, fault, and application constraints that ChaosGuard rules evaluate against chaos experiments.
@@ -256,6 +574,9 @@ export const descGetRisk = `Get chaos risk details`;
 export const descRunExperiment = `Trigger a new chaos experiment run. This is an action — it starts execution.
 Returns notifyId, experimentRunId, experimentId, and experimentName.
 
+Step 0 — Inspect the action contract FIRST:
+  Call harness_describe with resource_type=chaos_experiment and look at the run execute action. It lists every accepted input field (inputset_identity, runtime_inputs, experiment_variables, tasks, is_identity) with type and description. Do NOT skip this step — it is the source of truth for what the action accepts, and is how you discover knobs like is_identity (controls slug vs UUID lookup for experiment_id).
+
 IMPORTANT: You MUST follow this workflow before triggering a run. Do NOT skip steps or auto-fill values.
 
 Step 1 — Discover runtime variables:
@@ -309,6 +630,7 @@ export const descCreateFromTemplate = `Creates and launches a new chaos experime
 
 IMPORTANT: You MUST NOT auto-select, assume, or pre-fill any value on behalf of the user.
 At every step below, you MUST display the available options and wait for explicit user confirmation before proceeding.
+NOTE: based on your previous user activies still don't assume their org/project/hub/template etc, they might would want to chose a different everytime. 
 
 Required workflow — follow in order, pausing for user input after each step:
 
@@ -368,20 +690,26 @@ ERRORS:
 
 NOTES:
   - The "identity" field is for the NEW experiment being created, not the template (template is identified by template_id).
-  - Scope query params (accountIdentifier, organizationIdentifier, projectIdentifier) are auto-injected — only the body scope fields (account_id, org_id, project_id) need to be passed explicitly.`;
+  - Scope query params (accountIdentifier, organizationIdentifier, projectIdentifier) are auto-injected — only the body scope fields (account_id, org_id, project_id) need to be passed explicitly.
+  
+ Note: If user wants to create an experiment from scratch (without using a template), use the create_experiment action on chaos_experiment. 
+  `;
 
 export const descListRevisions = `List revision history for a template.
-Returns all revisions with their identifiers, timestamps, and change descriptions. Use to track template evolution or find a specific revision for comparison.`;
+Returns all revisions with their identifiers, timestamps, and change descriptions. Use to track template evolution or find a specific revision for comparison.
+Pass via params (NOT body): template_id (path — template identity, required), hub_identity (query — hub the template belongs to, required).`;
 
 export const descGetVariables = `Get the input variables defined in a template.
 Returns variable definitions including names, types, default values, and descriptions. Use before create_from_template to discover required inputs.
-Optionally specify a revision to get variables from a specific version.`;
+Pass via params (NOT body): template_id (path — template identity, required), hub_identity (query — hub the template belongs to, required), revision (query — specific version, optional; omit for default/latest).`;
 
 export const descGetYaml = `Get the full YAML representation of a template.
-Returns the rendered YAML for inspection or export. Optionally specify a revision for a specific version.`;
+Returns the rendered YAML for inspection or export.
+Pass via params (NOT body): template_id (path — template identity, required), hub_identity (query — hub the template belongs to, required), revision (query — specific version, optional; omit for default/latest).`;
 
 export const descCompareRevisions = `Compare two revisions of a template.
-Returns a diff showing what changed between revision1 and revision2. Both revision identifiers are required — use list_revisions to discover available revisions.`;
+Returns a diff showing what changed between revision1 and revision2. Use list_revisions to discover available revisions.
+Pass via params (NOT body): template_id (path — template identity, required), hub_identity (query — hub the template belongs to, required), revision1 (query — required), revision2 (query — required).`;
 
 export const descRunLoadtest = `Run a load test instance`;
 export const descStopLoadtest = `Stop a running load test`;
@@ -417,7 +745,7 @@ Requires the template identity, hub identity, and two revision numbers.`;
 export const descBodyExperimentRun = `Optional runtime inputs for the chaos experiment. Use chaos_experiment_variable list to discover required variables first.`;
 export const descBodyNoBody = `No body required. Resource identified by path parameter.`;
 export const descBodyCreateFromTemplate = `Chaos experiment from template`;
-export const descBodyLoadtestDefinition = `Load test instance definition`;
+export const descBodyLoadtestDefinition = `Locust load test definition. name, environment_id, infra_id and target_url are required. Provide EITHER 'script' (inline Python; script_source=inline, default) OR 'script_image' (Custom Image; script_source=image, Kubernetes). The rest have sensible defaults.`;
 
 // ── Field Descriptions ───────────────────────────────────────────────
 
@@ -429,8 +757,24 @@ export const descExperimentIdentity = `Experiment identity (auto-generated from 
 export const descInfraRef = `Infrastructure reference in format: environmentId/infraId. Use chaos_environment list to find environments, then chaos_k8s_infrastructure list to find infraIDs.`;
 export const descExperimentId = `Chaos experiment identifier. Accepts either the internal UUID (default, with is_identity=false) or the human-readable identity slug (set is_identity=true). Use harness_list with resource_type=chaos_experiment to find experiment IDs.`;
 export const descInfraStatus = `Filter by infra status: Active (default) or All`;
-export const descLoadtestName = `Load test name`;
-export const descLoadtestType = `Load test type`;
+export const descLoadtestName = `Display name for the load test. Only lowercase letters, numbers and dashes are allowed (e.g. "kubernete-example-1").`;
+export const descLoadtestType = `Load test tool type. Only "Locust" is supported today (JMeter and K6 are coming soon). Default: Locust.`;
+export const descLoadtestIdentity = `Stable identifier for the load test. Auto-derived from name (alphanumeric) when omitted.`;
+export const descLoadtestDescription = `Optional human-readable description.`;
+export const descLoadtestTags = `Optional tags (array of strings, or comma-separated string).`;
+export const descLoadtestEnvId = `Environment identifier of the load-runner infrastructure. Use the 'environmentID' from chaos_infrastructure (Linux VM) or chaos_enabled_infrastructure (Kubernetes).`;
+export const descLoadtestInfraId = `Load-runner infrastructure identifier. Use the 'infraID' from chaos_infrastructure (Linux VM) or chaos_enabled_infrastructure (Kubernetes).`;
+export const descLoadtestTargetType = `Execution environment target type: "machine-chaos-linux" (Linux VM, default) or "kubernetes".`;
+export const descLoadtestTargetUrl = `Base URL of the application under test (e.g. https://www.google.com).`;
+export const descLoadtestScript = `Raw Python (locust) script contents for inline mode (script_source=inline). Base64-encoded automatically into scriptContent. Required for inline mode; omit for Custom Image mode.`;
+export const descLoadtestScriptSource = `Test definition source: "inline" (default — upload a raw Python locust script via 'script') or "image" (Kubernetes only — use a prebuilt container image via 'script_image'). Inferred as "image" when script_image is set, otherwise "inline".`;
+export const descLoadtestScriptImage = `Custom Image mode (Kubernetes): prebuilt container image used as the load test source, e.g. "my-registry/my-load-test:latest". Required when script_source=image.`;
+export const descLoadtestScriptEntrypoint = `Custom Image mode (optional): entrypoint file inside the image, e.g. "locustfile.py".`;
+export const descLoadtestLoadArgs = `Custom Image mode (optional): arguments passed to the container as key=value pairs — comma-separated for multiple values per key, separated by ';'. Example: "tags=smoke,fast;headless=true".`;
+export const descLoadtestUsers = `Number of simulated users. Default: 100.`;
+export const descLoadtestDurationSec = `Total test duration in seconds. Default: 600.`;
+export const descLoadtestRampUpSec = `Ramp-up duration in seconds. Default: 120.`;
+export const descLoadtestWorkerCount = `Kubernetes only: number of distributed worker pods (0 = standalone, default 0). Sent as variables.workerCount.`;
 
 export const descHubIdentityExact = `The unique identity of the ChaosHub. Use harness_list with resource_type=chaos_hub to find hub identities.`;
 export const descHubName = `Display name for the ChaosHub.`;
@@ -455,7 +799,13 @@ export const descRevision2 = `Second revision identifier for comparison.`;
 export const descRevisionToCompare = `Second revision identifier for comparison (action templates use this param name).`;
 export const descSortField = `Field to sort results by.`;
 export const descSortAsc = `When true, sort in ascending order. Defaults to false (descending).`;
-export const descTags = `Comma-separated list of tags to filter by. Must have ALL specified tags (AND filter).`;
+export const descTags = `Comma-separated list of tag substrings to filter by (AND match — each tag must appear as a substring in at least one of the resource's tags).
+For chaos_experiment specifically, the backend auto-emits these system tags you can filter on:
+  - fault=<faultName>     (always present): tags=fault=pod-delete, tags=fault=gcp (matches all gcp-* faults)
+  - probe=<probeID>       (always present): tags=probe=<probeID>
+  - workload=<workloadName> (only on app-map-bound experiments): tags=workload=payments-api
+  - service=<serviceName>   (only on app-map-bound experiments): tags=service=payments-api
+Combine: tags=fault=pod-delete,workload=payments-api → experiments that pod-delete the payments-api workload.`;
 export const descIncludeAllScope = `Controls scope filtering for list queries. false (default): Returns only templates matching the exact organizationIdentifier and projectIdentifier provided. If both are empty, returns only account-level and Enterprise ChaosHub (global) templates. true: Returns templates across all organizations and projects in the account, plus Enterprise ChaosHub (global) templates. Use this when you need a combined view of built-in enterprise templates and custom templates across scopes, or when the user's org/project context is unknown.`;
 export const descInfrastructure = `Infrastructure filter (e.g. KubernetesV2).`;
 
@@ -474,7 +824,7 @@ export const descExperimentTags = `Optional tags for the experiment as an array 
 
 // Probe/action template fields
 
-export const descEntityTypeProbe = `Probe entity type filter (e.g. httpProbe, cmdProbe, promProbe, k8sProbe, sloProbe, datadogProbe, dynatraceProbe, containerProbe, apmProbe).`;
+export const descEntityTypeProbe = `Probe entity type filter. Accepts a comma-separated list (e.g. "httpProbe,cmdProbe"). Common values: httpProbe, cmdProbe, promProbe, k8sProbe, sloProbe, datadogProbe, dynatraceProbe, containerProbe, apmProbe.`;
 export const descEntityTypeAction = `Action entity type filter (e.g. delay, customScript, container).`;
 
 // Hub faults fields
@@ -492,6 +842,12 @@ export const descExperimentInfraId = `Filter experiments by infrastructure ID. I
 export const descExperimentIds = `Comma-separated experiment IDs for bulk lookup (e.g. "id1,id2,id3").`;
 export const descExperimentStartDate = `Filter by start date (Unix milliseconds, e.g. "1711324800000"). Must be used together with end_date.`;
 export const descExperimentEndDate = `Filter by end date (Unix milliseconds, e.g. "1711324800000"). Must be used together with start_date.`;
+
+export const descExperimentTargetNetworkMapIds = `Comma-separated chaos_application_map identities; returns experiments bound to any of these app maps. Useful when you already have an app map and want every experiment that targets workloads inside it. Bypasses the tag-substring approach (no tags=workload= needed).`;
+
+export const descExperimentMyExperiments = `When true, return only experiments created or updated by the calling user. Default: false.`;
+
+export const descExperimentExcludeAutomation = `When true, exclude experiments that were triggered by pipeline automation (e.g. via DR-test pipelines). Default: false.`;
 
 // K8s infrastructure fields
 
@@ -517,7 +873,7 @@ export const descGuardEnabled = `Set to true to enable the rule, false to disabl
 // ── Chaos Action Resource ────────────────────────────────────────────
 
 export const descChaosAction = `Chaos action — a reusable step (delay, custom script, container) that can be embedded in chaos experiment workflows.
-Supports list, get, delete, and get_manifest execute action.
+Supports list, get, create, delete, and get_manifest execute action.
 Returns identity, name, type, infrastructureType, actionProperties, variables, and audit info.`;
 
 export const descChaosProbeInRun = `Probe execution results within one or more chaos experiment runs — the primary way to check which probes ran and whether they passed or failed.
@@ -537,14 +893,14 @@ REQUIRED pre-call workflow:
 3. Do NOT proceed unless the user explicitly confirms using the experiment name (not just "yes").
 4. If the user seems unsure, suggest archiving or disabling instead of deleting.
 
-Returns experimentId, experimentName, isDeleted.`;
+Returns experimentId, experimentName, isDeleted. Like get, this endpoint requires the internal UUID (experimentID); the UI slug will not work — list first if you only have the slug.`;
 
 export const descStopExperiment = `Stop a chaos experiment run.
 Pass experiment_id via resource_id. Pass experiment_run_id, notify_id, force via params (not inputs).
 If notify_id is set, the run is found by notify_id and scope; otherwise by experiment_run_id and scope.
 If both are omitted, all runs for the experiment with phase 'Running' are stopped.
 force=true immediately marks the run as Stopped in the database; false (default) requests stop on cluster/machine.
-Returns isStopped, experimentId, and experimentName.`;
+Returns isStopped, experimentId, and experimentName. Requires the internal UUID (experimentID); the UI slug will not work — list first if you only have the slug.`;
 
 export const descGetProbeManifest = `Get the YAML manifest for a chaos probe by its ID (compatible with chaos engine).
 Returns a JSON object with a 'manifest' field containing the raw YAML string.
@@ -626,6 +982,14 @@ export const descExperimentRunIds = `List of experiment run IDs to fetch probe d
 export const descNotifyIds = `List of notify IDs (pipeline-triggered run identifiers) to fetch probe details for. Matches any notify ID in the list (OR within).`;
 export const descFaultIdentityParam = `Unique identity of the fault. Use chaos_fault list to find fault identities.`;
 export const descIsEnterpriseFilter = `When true, filter for enterprise faults only. Defaults to false.`;
+export const descFaultSearch = `Search faults by name (case-insensitive substring match).`;
+export const descFaultListType = `Filter faults by type (exact match on the fault's type field).`;
+export const descFaultListInfraType = `Filter faults by infrastructure type. Backend currently supports "Kubernetes".`;
+export const descFaultListInfrastructure = `Filter faults by specific infrastructure (e.g. "KubernetesV2"). Matches faults whose infras array includes this value.`;
+export const descFaultListTags = `Comma-separated list of tags. Returns only faults that have ALL specified tags (AND match).`;
+export const descFaultListCategory = `Comma-separated list of categories. Returns only faults whose categories include ALL specified values (AND match).`;
+export const descFaultListSortField = `Field to sort by. Backend honors only "name" and "lastUpdated"; other values fall through to the default (no sort).`;
+export const descFaultListSortAscending = `When true, sort ascending. Defaults to false (descending).`;
 export const descIsEnterpriseGet = `When true, get an enterprise fault. Defaults to false.`;
 export const descIsEnterpriseYaml = `When true, get YAML for an enterprise fault. Defaults to false.`;
 export const descIsEnterpriseVars = `When true, get variables for an enterprise fault. Defaults to false.`;
@@ -633,6 +997,28 @@ export const descIsEnterpriseRuns = `When true, list runs for an enterprise faul
 export const descActionIdentityParam = `Unique identity of the action. Use chaos_action list to find action identities.`;
 export const descSearchActionsParam = `Filter actions by name.`;
 export const descHubIdentityActions = `Filter actions by chaos hub identity.`;
+export const descCreateAction = `Create a chaos action (POST /rest/actions). A chaos action is a reusable step embedded in chaos experiment workflows.
+There are exactly 3 kinds, set via 'type': "delay" | "customScript" | "container". If the user has not said which kind, ASK them before calling — do not guess.
+Also ask which infrastructure_type to use before creating — delay and customScript support Kubernetes, Windows, or Linux; container is always Kubernetes.
+Required: name, type, infrastructure_type, and the matching action_properties sub-object for the chosen type. identity defaults to name when omitted (must be unique in the project).
+action_properties shape by type:
+  - delay:        { "delayAction": { "duration": "5s" } }   (or use the 'duration' shorthand)
+  - customScript: { "customScriptAction": { "command": "...", "args": ["..."], "env": [{ "name": "...", "value": "..." }] } }
+  - container:    { "containerAction": { "image": "<required>", "command": ["..."], "args": "...", "env": [{ "name": "...", "value": "..." }], "namespace": "...", "imagePullPolicy": "IfNotPresent" } }
+For container: image is REQUIRED, command is a string ARRAY, args is a single STRING (opposite of customScript), namespace is optional (inherits from the experiment when omitted). Advanced container fields (volumes, volumeMounts, resources, nodeSelector, tolerations, affinity, security contexts, etc.) are also accepted under containerAction.
+customScript and container actions also accept run_properties { timeout, interval, initialDelay, maxRetries, iterations, stopOnFailure, verbosity }; delay ignores run_properties.`;
+export const descBodyActionCreate = `Body for creating a chaos action. Provide name, type, infrastructure_type, and action_properties (matching the type). For delay actions you may pass 'duration' instead of action_properties.`;
+export const descActionName = `Display name of the action (required). Also used as the default identity when identity is omitted.`;
+export const descActionIdentityCreate = `Unique action identifier within the project. Optional — defaults to name when omitted. Must be unique (create fails with "action identifier ... already exists" otherwise).`;
+export const descActionEntityTypeCreate = `Kind of action to create. One of: delay, customScript, container. If unspecified by the user, ask which kind before creating.`;
+export const descActionInfraTypeCreate = `Infrastructure the action runs on. delay and customScript actions support: Kubernetes, Windows, Linux. container actions support: Kubernetes only. ALWAYS ask the user which infrastructure they want before creating (except container, which is always Kubernetes) — do not assume.`;
+export const descActionPropertiesBody = `Action configuration object keyed by type. delay: { delayAction: { duration } }. customScript: { customScriptAction: { command (string), args (string[]), env [{name,value}] } }. container: { containerAction: { image (required), command (string[]), args (string), env [{name,value}], namespace, imagePullPolicy ("Always"|"IfNotPresent"|"Never") } }. Required unless 'duration' is provided for a delay action. Note command/args are swapped between customScript and container.`;
+export const descActionDurationShorthand = `Shorthand for delay actions only: the delay duration (e.g. "5s", "1m"). When provided and action_properties is omitted, builds action_properties.delayAction.duration.`;
+export const descActionDescriptionCreate = `Optional description for the action.`;
+export const descActionTagsCreate = `Optional tags as an array of strings (e.g. ["op:tag1","op:tag2"]). A comma-separated string is also accepted and split.`;
+export const descActionVariablesBody = `Optional variables array. Each item: { name, type ("String"|"Number"), value, description?, required? }.`;
+export const descActionRunPropertiesBody = `Optional run properties for customScript and container actions (camelCase keys; durations like "10s"): timeout, interval, initialDelay, maxRetries, iterations, stopOnFailure, verbosity. Ignored for delay actions.`;
+export const descActionInputsBody = `Optional inputs array (template inputs). Defaults to [] when omitted.`;
 export const descExperimentVariablesParam = `Optional experiment variables as an array of objects where each object has a name and value.`;
 export const descTasksParam = `Optional task-level variables as an object where each key is a task name and the value is an object with variable name-value pairs.`;
 export const descEnvironmentIdCreate = `Unique identifier for an environment. Use chaos_environment list to find environment IDs.`;
@@ -669,7 +1055,7 @@ Supports pagination (page, limit) and sorting (sort).
 
 Constraints:
 - Pagination and sort apply to the underlying pipeline list, not individual DR Test stages — a page of N pipelines may yield more or fewer DR Tests since one pipeline can contain multiple DRTest stages.
-- The response has no server-side pagination metadata; total count is derived from the returned array length.
+- The response includes server-side pagination metadata (totalItems, totalPages) in a pagination object.
 - recentRuns are at the pipeline level — all DRTest stages from the same pipeline share the same recent execution history.
 - Only pipelines tagged module=drtest are returned; this filter is hardcoded and not user-configurable.
 - The search parameter is accepted without error but has no effect — it is inherited from a shared query type but not wired in the backend.`;
@@ -745,4 +1131,216 @@ export const descInputSetSpec = `JSON string containing the input set variable o
 
 export const descInputSetId = `Input set ID. Use harness_list with resource_type=chaos_input_set to find input set IDs.`;
 
-export const descIsIdentity = `Controls how experiment_id is interpreted. false (default): experiment_id is an internal UUID. true: experiment_id is a human-readable identity slug.`;
+export const descIsIdentity = `Controls how experiment_id is interpreted by the backend. Pass is_identity=true to use the human-readable identity slug (e.g. "exp-without-runtime" from the UI URL). Pass is_identity=false to use the internal UUID (e.g. "ef9199b6-0248-4c0b-9d63-9176bf2b7123"). Default varies by resource: chaos_input_set operations default to false (UUID); chaos_experiment_variable.list and chaos_experiment.run default to true (slug). Only applies where the backend honors the toggle: chaos_experiment.run, chaos_experiment_variable.list, and chaos_input_set.{list,get,create,update,delete}. If is_identity=true fails with "no documents in result", the experiment may predate the identity field — use harness_list(resource_type=chaos_experiment) to find the UUID and retry with is_identity=false.`;
+
+// ── Chaos Component Variables (unified v3 endpoint) ─────────────────
+
+export const descChaosComponentVariable = `Runtime-configurable input variables for a chaos component (Fault, Probe, or Action). This is a unified v3 endpoint that retrieves variables for any component type via the type and identifier query params. Each variable describes a runtime input: its name, current/default value, data type, category, path in the component manifest, whether it is required, and allowed values. A value of '<+input>' means the variable is an unresolved runtime placeholder that must be supplied before execution. Supports get only (always returns exactly one component). Use harness_get with resource_type=chaos_component_variable, type=<Fault|Probe|Action>, identifier=<component-identity>.`;
+
+export const descGetComponentVariable = `Get runtime input variables for a specific chaos component. Requires type (Fault, Probe, or Action) and identifier (the component's identity/name). Returns the component name and its list of variables with metadata: name, value, path, category, type, required flag, allowed values, default, and validator regex.`;
+
+export const descComponentType = `Component type to retrieve variables for. One of: Fault, Probe, Action.`;
+
+export const descComponentIdentifier = `Identity (name/slug) of the chaos component whose variables to retrieve (e.g. 'my-http-probe', 'pod-delete-fault').`;
+
+export const descComponentHubReference = `Optional ChaosHub reference for hub-imported components. Omit for project-scoped components.`;
+
+// ── Chaos Experiment Create ─────────────────────────────────────────
+
+export const descCreateExperiment = `Create or update a chaos experiment (POST /rest/v2/experiment — upsert). When body id matches an existing experiment, it updates; otherwise creates new.
+Requires name, manifest (JSON string with valid apiVersion), infra_id, and infra_type.
+Identity is optional for create (auto-generated from name if omitted), required for update (must be the existing identity — immutable, never regenerate).
+Both identity and name must be unique within the project scope.
+The manifest must be a valid JSON string containing apiVersion (suffix /v1alpha1, /v1alpha2, or /v1beta1).
+For Kubernetes v1beta1, at least one fault is required in spec.faultRef.
+infra_type must be one of: Kubernetes, KubernetesV2, Linux, Windows, CloudFoundry, Container — empty/invalid errors.
+For Kubernetes, infra_id must be in 'environmentId/infraId' format.
+To create from a template instead, use the create_from_template action on chaos_experiment_template.
+Note: This endpoint is an upsert — it creates or updates depending on whether the id matches an existing experiment. To create from a template instead, use the create_from_template action on chaos_experiment_template.
+`;
+
+export const descBodyExperimentCreate = `Request body for creating or updating a chaos experiment (upsert — id match triggers update).
+
+Required fields: name, manifest, infra_id, infra_type.
+Optional: description, tags, cron_syntax, experiment_type.
+identity: optional for create (auto-generated from name if omitted), required for edit (use existing identity — immutable, never regenerate).
+
+Validation rules:
+- identity: ^[a-z0-9-]*$, no leading/trailing dash, max 47 chars, unique in project
+- name: must be unique within account/org/project
+- manifest: valid JSON string with apiVersion (litmuschaos.io/v1beta1); K8s v1beta1 needs >= 1 fault
+- infra_id + infra_type: both required, must be provided together
+- infra_id: always composite format '{environmentIdentifier}/{infrastructureIdentifier}' (e.g. 'demo/qaauto1') — applies to ALL infra types
+- infra_type (case-sensitive enum): Kubernetes | KubernetesV2 | Linux | Windows | windows (backward-compat alias) | CloudFoundry | Container
+
+Field derivation:
+- id: from spec.experimentId in the manifest (UUID v4, generate new for create)
+- identity: from experiment name — lowercase, strip all non [a-z0-9] chars, max 47 chars (e.g. 'try-exp-creation-01' -> 'tryexpcreation01')
+- manifest: experiment YAML parsed to JSON object, then serialized to a compact JSON string
+- tags: user tags + auto-generated 'fault=<faultRef.identity>' and 'probe=<probeRef.identity>' for each unique fault/probe
+
+Example — KubernetesV2 experiment YAML (fault + probe + action):
+apiVersion: litmuschaos.io/v1beta1
+kind: ChaosExperiment
+metadata:
+  name: try-exp-creation-01
+  namespace: hce
+spec:
+  actionRef:
+    - continueOnCompletion: false
+      identity: test-action-008
+      infraId: qaauto1
+      name: test-action-008-86c
+      values:
+        - name: DURATION
+          value: <+input>
+        - name: VARIABLES_0_variable1
+          value: <+input>
+  cleanupPolicy: delete
+  experimentId: 218b1053-e0d6-40d6-bf00-1fecc0fc0faf
+  experimentRunId: ""
+  faultRef:
+    - authEnabled: false
+      identity: gcp-vm-service-kill
+      infraId: qaauto1
+      isEnterprise: true
+      name: gcp-vm-service-kill-acu
+      values:
+        - name: TOTAL_CHAOS_DURATION
+          value: 90
+        - name: NODE_LABEL
+          value: Node_Some_Vlaue
+        - name: VM_INSTANCE_NAME
+          value: <+input>
+        - name: SERVICE_NAME
+          value: <+input>
+        - name: VM_USERNAME
+          value: <+input>
+        - name: ZONE
+          value: <+input>
+        - name: GCP_PROJECT_ID
+          value: <+input>
+  infraId: demo/qaauto1
+  infraType: KubernetesV2
+  probeRef:
+    - duration: 30s
+      identity: new-cmd-probe-source-826
+      infraId: qaauto1
+      name: new-cmd-probe-source-ot6-0xd
+      values:
+        - name: COMPARATOR_VALUE
+          value: <+input>
+      weightage: 10
+  serviceAccountName: litmus
+  vertices:
+    - name: v-ae8
+      start:
+        faults:
+          - name: gcp-vm-service-kill-acu
+    - end:
+        faults:
+          - name: gcp-vm-service-kill-acu
+      name: v-0z5
+      start:
+        probes:
+          - name: new-cmd-probe-source-ot6-0xd
+    - end:
+        probes:
+          - name: new-cmd-probe-source-ot6-0xd
+      name: v-886
+      start:
+        actions:
+          - name: test-action-008-86c
+    - end:
+        actions:
+          - name: test-action-008-86c
+      name: v-end
+
+harness_create body for above (snake_case keys — manifest is the above YAML as a compact JSON string):
+{"id":"218b1053-e0d6-40d6-bf00-1fecc0fc0faf","identity":"tryexpcreation01","name":"try-exp-creation-01","manifest":"{\\"apiVersion\\":\\"litmuschaos.io/v1beta1\\",\\"kind\\":\\"ChaosExperiment\\",\\"metadata\\":{\\"name\\":\\"try-exp-creation-01\\",\\"namespace\\":\\"hce\\"},\\"spec\\":{\\"actionRef\\":[{\\"continueOnCompletion\\":false,\\"identity\\":\\"test-action-008\\",\\"infraId\\":\\"qaauto1\\",\\"name\\":\\"test-action-008-86c\\",\\"values\\":[{\\"name\\":\\"DURATION\\",\\"value\\":\\"<+input>\\"},{\\"name\\":\\"VARIABLES_0_variable1\\",\\"value\\":\\"<+input>\\"}]}],\\"cleanupPolicy\\":\\"delete\\",\\"experimentId\\":\\"218b1053-e0d6-40d6-bf00-1fecc0fc0faf\\",\\"experimentRunId\\":\\"\\",\\"faultRef\\":[{\\"authEnabled\\":false,\\"identity\\":\\"gcp-vm-service-kill\\",\\"infraId\\":\\"qaauto1\\",\\"isEnterprise\\":true,\\"name\\":\\"gcp-vm-service-kill-acu\\",\\"values\\":[{\\"name\\":\\"TOTAL_CHAOS_DURATION\\",\\"value\\":90},{\\"name\\":\\"NODE_LABEL\\",\\"value\\":\\"Node_Some_Vlaue\\"},{\\"name\\":\\"VM_INSTANCE_NAME\\",\\"value\\":\\"<+input>\\"},{\\"name\\":\\"SERVICE_NAME\\",\\"value\\":\\"<+input>\\"},{\\"name\\":\\"VM_USERNAME\\",\\"value\\":\\"<+input>\\"},{\\"name\\":\\"ZONE\\",\\"value\\":\\"<+input>\\"},{\\"name\\":\\"GCP_PROJECT_ID\\",\\"value\\":\\"<+input>\\"}]}],\\"infraId\\":\\"demo/qaauto1\\",\\"infraType\\":\\"KubernetesV2\\",\\"probeRef\\":[{\\"duration\\":\\"30s\\",\\"identity\\":\\"new-cmd-probe-source-826\\",\\"infraId\\":\\"qaauto1\\",\\"name\\":\\"new-cmd-probe-source-ot6-0xd\\",\\"values\\":[{\\"name\\":\\"COMPARATOR_VALUE\\",\\"value\\":\\"<+input>\\"}],\\"weightage\\":10}],\\"serviceAccountName\\":\\"litmus\\",\\"vertices\\":[{\\"name\\":\\"v-ae8\\",\\"start\\":{\\"faults\\":[{\\"name\\":\\"gcp-vm-service-kill-acu\\"}]}},{\\"end\\":{\\"faults\\":[{\\"name\\":\\"gcp-vm-service-kill-acu\\"}]},\\"name\\":\\"v-0z5\\",\\"start\\":{\\"probes\\":[{\\"name\\":\\"new-cmd-probe-source-ot6-0xd\\"}]}},{\\"end\\":{\\"probes\\":[{\\"name\\":\\"new-cmd-probe-source-ot6-0xd\\"}]},\\"name\\":\\"v-886\\",\\"start\\":{\\"actions\\":[{\\"name\\":\\"test-action-008-86c\\"}]}},{\\"end\\":{\\"actions\\":[{\\"name\\":\\"test-action-008-86c\\"}]},\\"name\\":\\"v-end\\"}]}}","infra_id":"demo/qaauto1","infra_type":"KubernetesV2","description":"description for experiment","is_single_run_cron":false,"tags":["tag:1","tag:2","fault=gcp-vm-service-kill","probe=new-cmd-probe-source-826"]}
+
+Linux/Windows manifest differences (infra_id body field is always composite for all types):
+- metadata.namespace: absent (K8s only)
+- spec.serviceAccountName: absent (K8s only)
+- spec.experimentRunId: absent (K8s only, set to "" initially)
+- spec.infraId: UUID alone (K8s uses composite envId/infraId)
+- spec.infraType: 'Linux' or 'Windows' instead of 'KubernetesV2'
+- faultRef/probeRef/actionRef infraId: same UUID as spec.infraId (K8s uses short ID e.g. 'qaauto1')`;
+
+export const descExperimentManifest = `Full experiment specification as a JSON string. Must contain a valid apiVersion field with suffix /v1alpha1, /v1alpha2, or /v1beta1. For Kubernetes v1beta1 experiments, spec.faultRef must contain at least one fault — empty faultRef array is rejected. Empty string or invalid JSON will fail.`;
+
+export const descExperimentInfraType = `Infrastructure type for the experiment. Required — no default value; empty/invalid errors with 'infra type is not supported'.
+Valid values (case-sensitive string enum):
+- "Kubernetes" — Legacy Kubernetes infrastructure (v1)
+- "KubernetesV2" — New Kubernetes infrastructure (v2, recommended)
+- "Linux" — Linux machine-based infrastructure
+- "Windows" — Windows machine-based infrastructure
+- "windows" — Lowercase alias kept for backward compatibility (prefer "Windows")
+- "CloudFoundry" — Cloud Foundry infrastructure
+- "Container" — Container-based infrastructure
+Must be provided together with infra_id — both are required.`;
+
+export const descExperimentInfraIdCreate = `Target infrastructure reference. Must be provided together with infra_type — both are required.
+Composite format: "{environmentIdentifier}/{infrastructureIdentifier}" (e.g. "demo/qaauto1"). Applies to ALL infra types.
+
+If infra_id is not already known, discover it:
+  Step 1 — List environments: call harness_list resource_type=chaos_environment. Present environment names and identifiers to the user and let them pick one.
+  Step 2 — List infrastructures: call harness_list resource_type=chaos_k8s_infrastructure (for Kubernetes/KubernetesV2) or chaos_infrastructure (for Linux/Windows/Container/CloudFoundry) with environment_id=<selected env>. Only infrastructures where status=ACTIVE AND isChaosEnabled=true are valid — exclude all others. Present only valid infras to the user. If none are valid, do not proceed.
+  Step 3 — Build infra_id: combine as "{environmentIdentifier}/{infraID}" (e.g. environment "demo" + infra "qaauto1" = "demo/qaauto1").`;
+
+export const descExperimentCronSyntax = `Optional cron expression for scheduling recurring experiment runs (e.g. '0 0 * * *' for daily). When provided, the experiment type is automatically set to CronExperimentV2. NOT validated at save time — invalid cron will fail when the schedule is actually enabled. Omit for one-time experiments.`;
+
+// ── Service Discovery ───────────────────────────────────────────────────
+//
+// Service Discovery (SD) is a Chaos sub-feature. An SD agent runs in a
+// Kubernetes cluster and continuously inventories the cluster using the
+// Kubernetes API plus eBPF (kprobe) for real-time network traffic. The
+// inventory is persisted to the Harness `servicediscovery` backend and
+// consumed by Chaos Engineering to pick targets, fault types, and
+// validations. All read endpoints return read-only snapshots from the
+// agent's last sync.
+
+// Shared filter / behavior descriptions
+export const descSDAgentIdentity = `Service Discovery agent identity — the path segment shown in the SD UI URL (e.g. 'chaosinfra'). Each agent is bound to one Harness environment and one Kubernetes cluster.`;
+
+export const descSDEnvironmentId = `Harness environment identifier the SD agent is bound to (e.g. 'dev'). Required by SD's AgentAccessCheck middleware to resolve the agent — the same agent identity may exist in multiple environments.`;
+
+export const descSDFetchAll = `When true, fetch every result and ignore page/limit (the API returns the full unpaginated list). Useful for small/medium clusters; avoid on very large clusters.`;
+
+export const descSDAgentDiagnostic = `404 from SD endpoints almost always means agent_identity or environment_id is wrong — both are required for AgentAccessCheck to resolve the agent. Both can be confirmed from the SD UI URL or (when added) the discovered_agent list.`;
+
+// discovered_namespace
+export const descDiscoveredNamespace = `Read-only snapshot of a Kubernetes Namespace recorded by a Service Discovery agent — includes the namespace name, UID, resource version, labels, annotations, owner references, and the full corev1.NamespaceSpec/Status from the cluster's last sync. Use namespaces as the scope boundary when listing discovered_service or future discovered_workload/discovered_connection resources for the same agent.`;
+
+export const descListDiscoveredNamespaces = `List Kubernetes namespaces snapshotted by a Service Discovery agent. Requires agent_identity (path) and environment_id (query). Returns soft-deleted-aware results (only live namespaces). Optional name filter (exact match, NOT substring — see name field doc). Supports page/limit pagination or all=true to fetch everything.`;
+
+export const descSDNamespaceNameFilter = `Filter namespaces by name — EXACT case-sensitive equality match against the Kubernetes namespace name (the SD backend wraps this in a Mongo equality filter, not a regex). For partial/fuzzy lookup, list all namespaces (use 'all=true') and filter client-side. Note: this differs from discovered_service's 'search' param, which IS case-insensitive substring.`;
+
+// discovered_service
+export const descDiscoveredService = `Read-only snapshot of a logical 'service' discovered by an SD agent. NOT limited to Kubernetes Services — the same resource type covers K8s Services / Workloads / Nodes, AWS load balancers (ALB/NLB/CLB), EC2 instances, Lambda functions, RDS, Linux/Windows VMs, Linux/Windows VM processes, and a generic 'Other' catch-all. The 'type' field discriminates which 'spec.*' block is populated. For Kubernetes services, 'spec.kubernetes' carries the K8s Service (cluster IPs, ports, type, external name) plus backing workloads (Deployment/StatefulSet/DaemonSet/Job/CronJob/RC) and pod replicas with phase, plus an optional cross-link to a Harness CD service.`;
+
+export const descListDiscoveredServices = `List logical services discovered by an SD agent — covers Kubernetes Services/Workloads, AWS resources (ALB/NLB/CLB, EC2, Lambda, RDS), VMs, and VM processes. Requires agent_identity (path) and environment_id (query). Optional namespace filter applies an equality match on spec.kubernetes.namespace (useful for K8s-typed records). Optional search applies a case-insensitive regex on the service name. To inspect L4 network edges between services, use the future discovered_connection / discovered_service_connection resources.
+
+IMPORTANT — pass compact: false on this call. The actionable payload lives inside spec.kubernetes.* (backing workloads with kind/uid, pod replicas with phase, service ports, cluster IPs, GKE NEG annotations) which the default compact mode strips because spec is not in the generic whitelist. The compacted view will silently drop these fields without indicating they exist.`;
+
+export const descSDNamespaceFilter = `Filter discovered services by Kubernetes namespace (exact match on spec.kubernetes.namespace). Only meaningful for records with a Kubernetes-typed spec; non-K8s records (Lambda, EC2, VMs) won't match.`;
+
+export const descSDSearchFilter = `Case-insensitive substring search on the discovered service's name field.`;
+
+// discovered_network_map
+export const descDiscoveredNetworkMap = `Service-discovery network map — the raw, per-agent inventory of services + connections discovered by an SD agent inside a single Kubernetes cluster.
+
+This is step 3 of the chaos onboarding journey (see chaos_application_map for the full lifecycle):
+  SD agent installed → discovers namespaces/services/workloads → user selects subset into an SD network map (this resource) → promoted into a chaos_application_map → experiments can target workloads inside it.
+
+Use this resource to inspect what an SD agent has discovered BEFORE it is grouped/promoted into a chaos_application_map (e.g. to debug "why is my service missing from the application map?").
+
+Returns name, identity, description, tags, environmentIdentifier, agentID, rules, resources (NetworkMapEntity[] — services in the map, each with kubernetes namespace + kind + hasWorkload metadata), and connections (eBPF-derived).`;
+
+export const descListDiscoveredNetworkMaps = `List service-discovery network maps for a specific SD agent and environment.
+Requires agent_identity (the SD agent ID, same as chaos_k8s_infrastructure.identity for SD-enabled infras) and environment_id.
+Supports search (name substring) and the all toggle (default false → server returns paginated chunk; true → server returns full list and skips the user-name enrichment loop).`;
+
+export const descSDNetworkMapSearch = `Case-insensitive substring match on network-map name. Optional.`;
+
+export const descExperimentIdUUID = `Experiment UUID (v4). Optional for create — the server auto-generates a UUID when omitted; only pass an id if you need to control it explicitly. For update, pass the exact id from harness_get to avoid creating a duplicate.`;
